@@ -524,6 +524,11 @@ mod tests {
         fs::write(path, file_bytes).unwrap();
     }
 
+    /// Verifies that a single `.safetensors` file (no index) is discovered, its header
+    /// parsed into tensor descriptors, and raw tensor bytes are loaded at correct offsets.
+    ///
+    /// This catches regressions in safetensors binary header parsing, offset calculation,
+    /// and the auto-discovery fallback when no index file exists.
     #[test]
     fn loads_single_safetensors_manifest_and_tensor() {
         let root = temp_dir("single");
@@ -558,6 +563,11 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Verifies that a sharded weight set with a `model.safetensors.index.json` maps
+    /// tensors to the correct shard files.
+    ///
+    /// This catches regressions in index-based shard routing and cross-validation
+    /// between the index file and the per-shard headers.
     #[test]
     fn loads_indexed_shards() {
         let root = temp_dir("sharded");
@@ -592,12 +602,20 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Verifies that `WeightManifest::from_root` returns `RootNotFound` when the
+    /// directory does not exist.
+    ///
+    /// This catches missing early-exit validation on the root path.
     #[test]
     fn rejects_missing_root() {
         let error = WeightManifest::from_root("/definitely/missing/weights").unwrap_err();
         assert!(matches!(error, WeightError::RootNotFound(_)));
     }
 
+    /// Verifies that `load_tensor` returns `TensorNotFound` when the requested name
+    /// is absent from the manifest.
+    ///
+    /// This catches regressions in the tensor lookup error path.
     #[test]
     fn rejects_missing_tensor() {
         let root = temp_dir("missing-tensor");

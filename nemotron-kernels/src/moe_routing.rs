@@ -287,6 +287,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the MoE routing kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -298,6 +301,9 @@ mod tests {
         );
     }
 
+    /// Verifies sigmoid top-k routing selects the two highest-scored experts.
+    ///
+    /// This catches errors in the sigmoid transform or sort/select logic.
     #[test]
     fn routes_single_token_with_sigmoid_top_k() {
         let output = moe_route_token(&[0.0, 1.0, -1.0, 2.0], 2).unwrap();
@@ -306,6 +312,9 @@ mod tests {
         approx_eq_slice(&output.weights, &[0.880797, 0.7310586]);
     }
 
+    /// Verifies that multi-token routing processes each token's scores independently.
+    ///
+    /// This catches row-stride indexing errors in the batched routing path.
     #[test]
     fn routes_multiple_tokens_row_major() {
         let output = moe_route(
@@ -321,6 +330,9 @@ mod tests {
         );
     }
 
+    /// Verifies that equal scores break ties toward the lower expert index.
+    ///
+    /// This catches unstable or reversed tie-breaking in the sort comparator.
     #[test]
     fn ties_break_toward_lower_expert_index() {
         let output = moe_route_token(&[0.0, 0.0, 1.0], 2).unwrap();
@@ -330,6 +342,9 @@ mod tests {
         approx_eq(output.weights[1], 0.5);
     }
 
+    /// Verifies that the _into variant writes into pre-allocated buffers.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn route_into_writes_existing_buffers() {
         let mut indices = [usize::MAX; 4];
@@ -347,6 +362,9 @@ mod tests {
         approx_eq_slice(&weights, &[0.7109495, 0.62245935, 0.95257413, 0.5]);
     }
 
+    /// Verifies softmax-normalized top-k routing with re-normalized selected weights.
+    ///
+    /// This catches errors in the softmax computation or top-k re-normalization.
     #[test]
     fn routes_with_softmax_normalized_top_k_weights() {
         let output = moe_route_softmax(
@@ -361,6 +379,9 @@ mod tests {
         approx_eq_slice(&output.weights, &[0.7646013, 0.23539874]);
     }
 
+    /// Verifies that routing zero tokens produces empty output without error.
+    ///
+    /// This catches panics on zero-length inputs.
     #[test]
     fn empty_token_batch_produces_empty_routes() {
         let output = moe_route(&[], MoeRoutingShape::new(0, 4, 2)).unwrap();
@@ -369,6 +390,9 @@ mod tests {
         assert!(output.weights.is_empty());
     }
 
+    /// Verifies that zero expert_count is rejected as an invalid shape.
+    ///
+    /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
         let error = moe_route(&[], MoeRoutingShape::new(1, 0, 1)).unwrap_err();
@@ -378,6 +402,9 @@ mod tests {
         );
     }
 
+    /// Verifies that top_k > expert_count is rejected.
+    ///
+    /// This catches missing constraint validation between top_k and expert_count.
     #[test]
     fn rejects_top_k_larger_than_expert_count() {
         let error = moe_route(&[0.0, 1.0], MoeRoutingShape::new(1, 2, 3)).unwrap_err();
@@ -387,6 +414,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a score buffer not matching token_count × expert_count is rejected.
+    ///
+    /// This catches missing score length validation.
     #[test]
     fn rejects_score_length_mismatch() {
         let error = moe_route(&[0.0, 1.0, 2.0], MoeRoutingShape::new(2, 2, 1)).unwrap_err();
@@ -400,6 +430,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small indices buffer is rejected in the _into variant.
+    ///
+    /// This catches missing indices length validation.
     #[test]
     fn rejects_indices_length_mismatch() {
         let mut indices = [0; 1];
@@ -422,6 +455,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small weights buffer is rejected in the _into variant.
+    ///
+    /// This catches missing weights length validation.
     #[test]
     fn rejects_weights_length_mismatch() {
         let mut indices = [0; 2];
@@ -444,6 +480,9 @@ mod tests {
         );
     }
 
+    /// Verifies that top_k=0 is rejected in the single-token routing API.
+    ///
+    /// This catches missing validation in the convenience wrapper.
     #[test]
     fn rejects_single_token_invalid_top_k() {
         let error = moe_route_token(&[0.0, 1.0], 0).unwrap_err();

@@ -189,6 +189,9 @@ mod tests {
         ]
     }
 
+    /// Verifies that the embedding kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -200,18 +203,27 @@ mod tests {
         );
     }
 
+    /// Verifies that a single token ID retrieves the correct embedding row.
+    ///
+    /// This catches off-by-one errors in the row offset calculation.
     #[test]
     fn looks_up_single_token() {
         let output = embedding_lookup_token(&sample_table(), 2, EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![2.0, 2.1, 2.2]);
     }
 
+    /// Verifies that multiple token IDs produce concatenated embedding rows.
+    ///
+    /// This catches indexing errors when writing multiple rows to the output.
     #[test]
     fn looks_up_multiple_tokens() {
         let output = embedding_lookup(&sample_table(), &[3, 1], EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![3.0, 3.1, 3.2, 1.0, 1.1, 1.2]);
     }
 
+    /// Verifies that duplicate token IDs produce duplicate embedding rows.
+    ///
+    /// This catches bugs where repeated lookups might alias or skip writes.
     #[test]
     fn repeated_tokens_repeat_rows() {
         let output =
@@ -219,6 +231,9 @@ mod tests {
         assert_eq!(output, vec![2.0, 2.1, 2.2, 2.0, 2.1, 2.2, 0.0, 0.1, 0.2]);
     }
 
+    /// Verifies that the _into variant writes into a pre-allocated buffer.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn lookup_into_writes_existing_buffer() {
         let mut output = [-1.0; 6];
@@ -232,12 +247,18 @@ mod tests {
         assert_eq!(output, [1.0, 1.1, 1.2, 0.0, 0.1, 0.2]);
     }
 
+    /// Verifies that an empty token ID list produces an empty output without error.
+    ///
+    /// This catches panics on zero-length inputs.
     #[test]
     fn empty_token_ids_produce_empty_output() {
         let output = embedding_lookup(&sample_table(), &[], EmbeddingShape::new(4, 3)).unwrap();
         assert!(output.is_empty());
     }
 
+    /// Verifies that zero vocab_size is rejected as an invalid shape.
+    ///
+    /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
         let error = embedding_lookup(&sample_table(), &[0], EmbeddingShape::new(0, 3)).unwrap_err();
@@ -247,6 +268,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a table shorter than vocab_size × hidden_size is rejected.
+    ///
+    /// This catches missing table length validation.
     #[test]
     fn rejects_table_length_mismatch() {
         let error =
@@ -261,6 +285,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small output buffer is rejected in the _into variant.
+    ///
+    /// This catches missing output length validation.
     #[test]
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 5];
@@ -281,6 +308,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a token ID equal to vocab_size is rejected as out of range.
+    ///
+    /// This catches off-by-one in the token ID bounds check.
     #[test]
     fn rejects_out_of_range_token() {
         let error = embedding_lookup(&sample_table(), &[4], EmbeddingShape::new(4, 3)).unwrap_err();
@@ -293,6 +323,9 @@ mod tests {
         );
     }
 
+    /// Verifies that the single-token _into variant rejects a wrong-sized output buffer.
+    ///
+    /// This catches missing output validation in the single-token code path.
     #[test]
     fn rejects_single_token_output_length_mismatch() {
         let mut output = [0.0; 2];

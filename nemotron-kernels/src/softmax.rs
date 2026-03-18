@@ -89,6 +89,9 @@ mod tests {
         );
     }
 
+    /// Verifies that the softmax kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -100,6 +103,9 @@ mod tests {
         );
     }
 
+    /// Verifies softmax output against known reference values for [1, 2, 3].
+    ///
+    /// This catches errors in the exp/normalize formula.
     #[test]
     fn softmax_matches_reference_values() {
         let output = softmax(&[1.0, 2.0, 3.0]);
@@ -109,6 +115,9 @@ mod tests {
         approx_eq(output[2], 0.66524094);
     }
 
+    /// Verifies that large inputs produce the same result as shifted inputs (numerical stability).
+    ///
+    /// This catches missing max-subtraction in the softmax, which would cause overflow.
     #[test]
     fn softmax_is_stable_for_large_inputs() {
         let output = softmax(&[1000.0, 1001.0, 1002.0]);
@@ -118,6 +127,9 @@ mod tests {
         approx_eq(output[2], 0.66524094);
     }
 
+    /// Verifies that softmax outputs sum to 1.0 across a wide value range.
+    ///
+    /// This catches partition normalization errors.
     #[test]
     fn softmax_outputs_sum_to_one() {
         let output = softmax(&[-10.0, 0.0, 10.0, 20.0]);
@@ -126,6 +138,9 @@ mod tests {
         approx_eq(sum, 1.0);
     }
 
+    /// Verifies that the in-place variant produces uniform probabilities for equal inputs.
+    ///
+    /// This catches issues where in-place writes are skipped or mis-ordered.
     #[test]
     fn softmax_in_place_updates_buffer() {
         let mut values = [0.0, 0.0, 0.0];
@@ -136,6 +151,9 @@ mod tests {
         approx_eq(values[2], 1.0 / 3.0);
     }
 
+    /// Verifies that mismatched input/output lengths are rejected.
+    ///
+    /// This catches missing length validation in the _into variant.
     #[test]
     fn softmax_into_rejects_length_mismatch() {
         let mut output = [0.0; 1];
@@ -150,6 +168,9 @@ mod tests {
         );
     }
 
+    /// Verifies that empty input produces empty output without error.
+    ///
+    /// This catches panics on zero-length slices.
     #[test]
     fn softmax_handles_empty_input() {
         assert_eq!(softmax(&[]), Vec::<f32>::new());

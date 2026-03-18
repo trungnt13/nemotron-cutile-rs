@@ -233,6 +233,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the quantize kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -244,6 +247,9 @@ mod tests {
         );
     }
 
+    /// Verifies INT4 pack/unpack round-trips correctly with an even value count.
+    ///
+    /// This catches nibble ordering errors (low vs high nibble placement).
     #[test]
     fn packs_and_unpacks_even_number_of_values() {
         let packed = pack_int4(&[0x1, 0xA, 0x3, 0xF]).unwrap();
@@ -253,6 +259,9 @@ mod tests {
         assert_eq!(unpacked, vec![0x1, 0xA, 0x3, 0xF]);
     }
 
+    /// Verifies INT4 pack/unpack with an odd value count (trailing nibble padding).
+    ///
+    /// This catches errors in the ceil-division packed length or trailing nibble handling.
     #[test]
     fn packs_and_unpacks_odd_number_of_values() {
         let packed = pack_int4(&[0x2, 0x4, 0x6]).unwrap();
@@ -262,6 +271,9 @@ mod tests {
         assert_eq!(unpacked, vec![0x2, 0x4, 0x6]);
     }
 
+    /// Verifies that quantize→dequantize round-trips losslessly with chosen affine params.
+    ///
+    /// This catches errors in the scale/zero_point formula or nibble encoding.
     #[test]
     fn quantizes_and_dequantizes_with_affine_params() {
         let params = Int4QuantizationParams::new(0.5, 8);
@@ -274,6 +286,9 @@ mod tests {
         approx_eq_slice(&output, &input);
     }
 
+    /// Verifies that out-of-range float values are clamped to the [0, 15] INT4 range.
+    ///
+    /// This catches missing clamp in the quantize scalar path.
     #[test]
     fn quantization_clamps_to_int4_range() {
         let params = Int4QuantizationParams::new(1.0, 8);
@@ -285,6 +300,9 @@ mod tests {
         approx_eq(output[1], 7.0);
     }
 
+    /// Verifies that the _into quantize variant writes into a pre-allocated buffer.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn quantize_into_writes_existing_buffer() {
         let params = Int4QuantizationParams::new(0.25, 0);
@@ -295,6 +313,9 @@ mod tests {
         assert_eq!(packed, [0x10, 0x02]);
     }
 
+    /// Verifies that the _into dequantize variant writes into a pre-allocated buffer.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn dequantize_into_writes_existing_buffer() {
         let params = Int4QuantizationParams::new(0.25, 2);
@@ -305,6 +326,9 @@ mod tests {
         approx_eq_slice(&output, &[-0.25, 0.25, 0.5]);
     }
 
+    /// Verifies that all pack/unpack/quantize/dequantize functions accept empty inputs.
+    ///
+    /// This catches panics on zero-length slices.
     #[test]
     fn handles_empty_inputs() {
         let params = Int4QuantizationParams::new(0.5, 8);
@@ -315,6 +339,9 @@ mod tests {
         assert_eq!(dequantize_int4(&[], 0, params).unwrap(), Vec::<f32>::new());
     }
 
+    /// Verifies that a zero scale is rejected as invalid quantization params.
+    ///
+    /// This catches missing scale validation (zero scale causes division by zero).
     #[test]
     fn rejects_invalid_quantization_params() {
         let error = quantize_int4(&[0.0], Int4QuantizationParams::new(0.0, 8)).unwrap_err();
@@ -324,12 +351,18 @@ mod tests {
         );
     }
 
+    /// Verifies that a nibble value > 15 is rejected during packing.
+    ///
+    /// This catches missing range check in the pack path.
     #[test]
     fn rejects_out_of_range_int4_value() {
         let error = pack_int4(&[16]).unwrap_err();
         assert_eq!(error, QuantizeError::Int4OutOfRange(16));
     }
 
+    /// Verifies that a too-small packed buffer is rejected in the _into variant.
+    ///
+    /// This catches missing packed length validation.
     #[test]
     fn rejects_packed_length_mismatch() {
         let mut packed = [0; 0];
@@ -350,6 +383,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small output buffer is rejected in dequantize_into.
+    ///
+    /// This catches missing output length validation.
     #[test]
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 1];
@@ -367,6 +403,9 @@ mod tests {
         );
     }
 
+    /// Verifies that NaN input is rejected during quantization.
+    ///
+    /// This catches missing non-finite input validation.
     #[test]
     fn rejects_non_finite_input() {
         let error = quantize_int4(&[f32::NAN], Int4QuantizationParams::new(1.0, 8)).unwrap_err();

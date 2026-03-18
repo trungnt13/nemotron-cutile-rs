@@ -239,6 +239,11 @@ impl Default for ModelConfig {
 mod tests {
     use super::{LayerBlockType, ModelConfig, SpecialTokenIds};
 
+    /// Verifies that a full Nemotron-3-Nano-30B-A3B JSON config deserializes correctly
+    /// and that `layer_block_types()` resolves the hybrid override pattern to 52 layers.
+    ///
+    /// This catches regressions in serde field mappings, alias resolution, and
+    /// hybrid pattern parsing for the target model.
     #[test]
     fn deserializes_target_config_fields_and_resolves_hybrid_layer_types() {
         let config = ModelConfig::from_json_str(
@@ -330,6 +335,10 @@ mod tests {
         );
     }
 
+    /// Verifies that `ModelConfig::default()` produces Nemotron-3-Nano-30B-A3B reference values.
+    ///
+    /// This catches accidental changes to default hyperparameters that would silently
+    /// misconfigure the target model.
     #[test]
     fn default_config_matches_target_model_values() {
         let config = ModelConfig::default();

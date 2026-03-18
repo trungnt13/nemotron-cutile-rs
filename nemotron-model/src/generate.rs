@@ -145,6 +145,10 @@ mod tests {
         )
     }
 
+    /// Verifies that `generation_preview` gracefully reports both "tokenizer not loaded"
+    /// and "tokenizer unavailable" when the model has neither tokenizer nor runtime.
+    ///
+    /// This catches regressions in the preview's error-reporting branches.
     #[test]
     fn generation_preview_reports_missing_runtime_without_tokenizer() {
         let preview = generation_preview(&NemotronModel::default(), &GenerationRequest::new("hi"));
@@ -152,8 +156,12 @@ mod tests {
         assert!(preview.contains("tokenizer unavailable"));
     }
 
+    /// Verifies that `generate` returns `MissingTokenizer` when the model has a runtime
+    /// but no tokenizer, since prompt encoding requires the tokenizer.
+    ///
+    /// This catches regressions where generate might bypass the tokenizer check.
     #[test]
-    fn generate_without_tokenizer_still_returns_tokens() {
+    fn generate_rejects_missing_tokenizer() {
         let model = tiny_runtime_model();
         let result = model
             .generate(&GenerationRequest {

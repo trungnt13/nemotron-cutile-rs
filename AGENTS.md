@@ -53,23 +53,43 @@ Do not skip straight to implementation for normal feature work. Start from resea
 
 ## ai-docs Ownership
 
-`ai-docs/` is the shared design-document workspace for research notes, plans, execution summaries, alignment notes, and verification results.
+`ai-docs/` is the shared design-document workspace for research notes, plans, execution summaries, alignment notes, and verification results. **Every substantial task must produce an `ai-docs/` record before it is considered complete.**
+
+### Naming Convention
+
+Use the pattern `executed-plan-<goal-description>.md` where `<goal-description>` is a short kebab-case summary of the task goal. Do not prefix with the project name — the repository already provides that context.
+
+Examples:
+- `executed-plan-build-nemotron-inference.md`
+- `executed-plan-verify-implementation-tests.md`
+- `executed-plan-add-flash-attention-kernel.md`
+
+### Requirements
 
 - Multi-agent work must use `ai-docs/` as the source of truth for handoff state.
 - Each agent must leave the docs in a better state than it found them: update status, decisions, blockers, commands run, and next actions.
-- When saving an execution record, include frontmatter with at least:
+- Implementation should not begin until the relevant `ai-docs/` document captures research and plan context, unless the user explicitly directs otherwise. If that happens, document the deviation immediately.
+
+### Enforcement Checklist
+
+Before marking any task complete, verify **all** of the following. Do not skip any step — incomplete handoff creates invisible debt.
+
+1. [ ] `cargo test --workspace` passes (or the relevant subset if scoped)
+2. [ ] An `ai-docs/executed-plan-*.md` file exists for this task with frontmatter:
 
 ```yaml
 ---
-status:
-goal:
-prompt:
-created:
-finished:
+status:        # e.g. complete, implemented-with-open-gaps, blocked
+goal:          # one-line goal statement
+prompt:        # the user prompt that initiated this task
+created:       # ISO 8601 timestamp
+finished:      # ISO 8601 timestamp (or blank if not yet finished)
 ---
 ```
 
-- Implementation should not begin until the relevant `ai-docs/` document captures research and plan context, unless the user explicitly directs otherwise. If that happens, document the deviation immediately.
+3. [ ] The body documents: what was done, key decisions, verification results, and next steps (if any)
+4. [ ] All changes are committed (`git status` shows clean working tree) with a message following the Commits convention above
+5. [ ] Commits are pushed to the remote (`git push`) — unsynced local commits are invisible to other agents and collaborators
 
 ## Project Context
 

@@ -138,13 +138,11 @@ impl fmt::Debug for ModelTokenizer {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelTokenizer, TokenizerSpec};
+    use super::*;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    use super::*;
     use tokenizers::models::wordlevel::WordLevel;
     use tokenizers::pre_tokenizers::whitespace::Whitespace;
 
@@ -175,6 +173,11 @@ mod tests {
             .expect("tokenizer should save to tokenizer.json");
     }
 
+    /// Verifies that a WordLevel tokenizer.json round-trips through load → encode → decode
+    /// and that vocab_size, token_to_id, and id_to_token resolve correctly.
+    ///
+    /// This catches regressions in the tokenizer file loading path, encoding pipeline,
+    /// and vocabulary lookup wrappers.
     #[test]
     fn loads_tokenizer_json_and_encodes_decodes_text() {
         let path = test_tokenizer_path("roundtrip");
@@ -200,6 +203,11 @@ mod tests {
         fs::remove_file(tokenizer.spec().source.clone()).expect("test tokenizer should be removed");
     }
 
+    /// Verifies that `TokenizerSpec::from_model_root` appends the default filename
+    /// (`tokenizer.json`) to the given root directory.
+    ///
+    /// This catches path construction bugs that would cause the tokenizer to look
+    /// for the wrong file.
     #[test]
     fn resolves_default_tokenizer_path_from_model_root() {
         let root = std::env::temp_dir().join("nemotron-model-root");

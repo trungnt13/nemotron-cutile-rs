@@ -40,6 +40,13 @@ fn write_safetensors_file(path: &Path, tensors: &[(&str, &str, &[usize], &[u8])]
     fs::write(path, file_bytes).expect("safetensors file should be written");
 }
 
+/// Verifies that a sharded weight set with a `model.safetensors.index.json` loads
+/// correctly: both files are discovered, tensor descriptors are routed to the right
+/// shard, and raw bytes are read at the correct offsets.
+///
+/// Fixture: two shard files (embed.weight → shard 1, lm_head.weight → shard 2)
+/// with an explicit index mapping. This catches regressions in index-based shard
+/// routing and tensor byte extraction across file boundaries.
 #[test]
 fn weight_manifest_loads_indexed_fixture_and_tensor_bytes() {
     let root = test_root("indexed");

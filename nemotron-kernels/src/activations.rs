@@ -101,6 +101,9 @@ mod tests {
         );
     }
 
+    /// Verifies that all activation kernels report HostFallback as their backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -122,6 +125,9 @@ mod tests {
         );
     }
 
+    /// Verifies sigmoid at zero, positive, and negative inputs against known values.
+    ///
+    /// This catches regressions in the numerically stable split-branch sigmoid.
     #[test]
     fn sigmoid_matches_reference_values() {
         approx_eq(sigmoid_scalar(0.0), 0.5);
@@ -129,6 +135,9 @@ mod tests {
         approx_eq(sigmoid_scalar(-2.0), 0.11920292);
     }
 
+    /// Verifies SiLU (x·σ(x)) at zero, positive, and negative inputs.
+    ///
+    /// This catches errors in the SiLU composition with sigmoid.
     #[test]
     fn silu_matches_reference_values() {
         approx_eq(silu_scalar(0.0), 0.0);
@@ -136,6 +145,9 @@ mod tests {
         approx_eq(silu_scalar(-1.0), -0.26894143);
     }
 
+    /// Verifies ReLU² clamps negatives to zero and squares positive values.
+    ///
+    /// This catches sign errors or missing squaring in the relu2 formula.
     #[test]
     fn relu2_matches_reference_values() {
         approx_eq(relu2_scalar(-3.0), 0.0);
@@ -143,12 +155,18 @@ mod tests {
         approx_eq(relu2_scalar(1.5), 2.25);
     }
 
+    /// Verifies that the vector API allocates a correctly sized output.
+    ///
+    /// This catches length miscalculation in the allocating wrappers.
     #[test]
     fn vector_api_allocates_output() {
         assert_eq!(sigmoid(&[0.0, 1.0]).len(), 2);
         assert_eq!(relu2(&[-1.0, 2.0]), vec![0.0, 4.0]);
     }
 
+    /// Verifies that the in-place API mutates the buffer with correct SiLU values.
+    ///
+    /// This catches issues where in-place writes are skipped or mis-ordered.
     #[test]
     fn in_place_api_updates_buffer() {
         let mut values = [-1.0, 0.0, 2.0];

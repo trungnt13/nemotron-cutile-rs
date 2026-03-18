@@ -262,6 +262,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the SSM kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -273,6 +276,9 @@ mod tests {
         );
     }
 
+    /// Verifies SSM output and final state for a 2-step, 1-channel, 2-state sequence.
+    ///
+    /// This catches errors in the discretization formula or state accumulation.
     #[test]
     fn selective_scan_updates_state_and_output() {
         let shape = SelectiveScanShape::new(2, 1, 2);
@@ -302,6 +308,9 @@ mod tests {
         approx_eq_slice(&output.final_state, &[3.0, 1.5]);
     }
 
+    /// Verifies that a non-zero initial state is carried into the first timestep.
+    ///
+    /// This catches bugs where initial_state is ignored or zeroed.
     #[test]
     fn selective_scan_uses_initial_state() {
         let shape = SelectiveScanShape::new(1, 1, 1);
@@ -325,6 +334,9 @@ mod tests {
         approx_eq_slice(&output.final_state, &[4.0]);
     }
 
+    /// Verifies that softplus is applied to delta_t when the flag is set.
+    ///
+    /// This catches missing or incorrect softplus gating of the time step.
     #[test]
     fn selective_scan_applies_softplus_to_delta_t() {
         let shape = SelectiveScanShape::new(1, 1, 1);
@@ -348,6 +360,9 @@ mod tests {
         approx_eq_slice(&output.final_state, &[0.6265234]);
     }
 
+    /// Verifies that the _into variant writes into pre-allocated output and state buffers.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn selective_scan_into_writes_existing_buffers() {
         let shape = SelectiveScanShape::new(2, 1, 1);
@@ -371,6 +386,9 @@ mod tests {
         approx_eq_slice(&final_state, &[2.0]);
     }
 
+    /// Verifies that a zero sequence_len is rejected as an invalid shape.
+    ///
+    /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
         let shape = SelectiveScanShape::new(0, 1, 1);
@@ -393,6 +411,9 @@ mod tests {
         assert_eq!(error, SsmError::InvalidShape(shape));
     }
 
+    /// Verifies that a mismatched B parameter length is rejected.
+    ///
+    /// This catches missing parameter length validation.
     #[test]
     fn rejects_length_mismatch() {
         let shape = SelectiveScanShape::new(1, 1, 1);
@@ -422,6 +443,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a negative delta_t (without softplus) is rejected at runtime.
+    ///
+    /// This catches missing dt sign validation, which would produce unstable SSM dynamics.
     #[test]
     fn rejects_negative_delta_t_without_softplus() {
         let shape = SelectiveScanShape::new(1, 1, 1);

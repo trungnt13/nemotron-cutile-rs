@@ -8,6 +8,12 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Verifies that the `nemotron-validate` binary exits successfully and reports
+/// all 9 validations (7 kernel + 2 e2e) as PASS when run against bundled fixtures.
+///
+/// This catches binary-level regressions: broken CLI argument handling, missing
+/// fixture files, stdout formatting changes, or silent validation failures that
+/// the unit test might not surface.
 #[test]
 fn validator_binary_passes_reference_fixtures() {
     let workspace_root = workspace_root();

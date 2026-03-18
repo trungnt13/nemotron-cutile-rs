@@ -399,6 +399,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the attention kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -410,6 +413,9 @@ mod tests {
         );
     }
 
+    /// Verifies Q·Kᵀ dot-product scores with a single head and scale=1.
+    ///
+    /// This catches errors in the score accumulation loop or indexing.
     #[test]
     fn computes_attention_scores_for_single_head() {
         let shape = AttentionShape::new(1, 1, 2, 1, 1, 2);
@@ -427,6 +433,9 @@ mod tests {
         approx_eq_slice(&scores, &[1.0, 0.0]);
     }
 
+    /// Verifies full scaled dot-product attention (scores → softmax → V weighted sum).
+    ///
+    /// This catches errors in softmax normalization or value accumulation.
     #[test]
     fn attends_over_single_head_without_masking() {
         let shape = AttentionShape::new(1, 1, 2, 1, 1, 2);
@@ -445,6 +454,9 @@ mod tests {
         approx_eq_slice(&output, &[7.5795274, 6.109886]);
     }
 
+    /// Verifies that causal masking prevents attending to future positions.
+    ///
+    /// This catches off-by-one errors in the causal mask boundary.
     #[test]
     fn applies_causal_mask() {
         let shape = AttentionShape::new(1, 2, 2, 1, 1, 2);
@@ -464,6 +476,9 @@ mod tests {
         approx_eq_slice(&output, &[10.0, 0.0, 2.6894143, 3.655293]);
     }
 
+    /// Verifies that multiple query heads share a single KV head in GQA.
+    ///
+    /// This catches errors in the query_head / kv_group_size mapping.
     #[test]
     fn grouped_query_attention_reuses_key_value_heads() {
         let shape = AttentionShape::new(1, 1, 2, 2, 1, 1);
@@ -482,6 +497,9 @@ mod tests {
         approx_eq_slice(&output, &[7.5795274, 8.927174]);
     }
 
+    /// Verifies that query_position_offset shifts the causal window for decode-phase attention.
+    ///
+    /// This catches off-by-one errors in the offset + query_index causal boundary.
     #[test]
     fn query_position_offset_supports_decode_style_causal_attention() {
         let shape = AttentionShape::new(1, 1, 3, 1, 1, 1);
@@ -501,6 +519,9 @@ mod tests {
         approx_eq_slice(&output, &[20.0]);
     }
 
+    /// Verifies that non-divisible query/KV head counts are rejected.
+    ///
+    /// This catches missing validation of the GQA head grouping constraint.
     #[test]
     fn rejects_invalid_head_grouping() {
         let shape = AttentionShape::new(1, 1, 1, 3, 2, 1);
@@ -521,6 +542,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small output buffer is rejected.
+    ///
+    /// This catches missing output length validation in the _into variant.
     #[test]
     fn rejects_output_length_mismatch() {
         let shape = AttentionShape::new(1, 1, 1, 1, 1, 1);
@@ -545,6 +569,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a zero softmax scale is rejected as invalid.
+    ///
+    /// This catches missing scale validation (zero or negative scales produce wrong results).
     #[test]
     fn rejects_invalid_scale() {
         let shape = AttentionShape::new(1, 1, 1, 1, 1, 1);

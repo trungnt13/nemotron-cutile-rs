@@ -370,6 +370,12 @@ fn reshape_conv_weights(
 mod tests {
     use super::*;
 
+    /// Verifies that all bundled kernel and e2e reference fixtures pass validation
+    /// when loaded from the repository's `data/` directory.
+    ///
+    /// This catches regressions in kernel implementations (GEMM, RMSNorm, softmax,
+    /// SiLU, ReLU², Conv1D, MoE routing) and end-to-end model behavior (tokenization,
+    /// forward pass, generation) against known-good reference outputs.
     #[test]
     fn bundled_reference_fixtures_validate() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");

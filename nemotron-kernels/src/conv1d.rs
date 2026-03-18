@@ -158,6 +158,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the conv1d kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -169,6 +172,9 @@ mod tests {
         );
     }
 
+    /// Verifies causal conv1d on a single channel with kernel_size=2.
+    ///
+    /// This catches errors in weight reversal (convolution vs correlation) and causal zero-padding.
     #[test]
     fn applies_single_channel_causal_filter() {
         let input = [1.0, 2.0, 3.0, 4.0];
@@ -178,6 +184,9 @@ mod tests {
         approx_eq_slice(&output, &[1.0, 4.0, 7.0, 10.0]);
     }
 
+    /// Verifies that each channel is convolved independently (depthwise).
+    ///
+    /// This catches cross-channel mixing bugs in index calculations.
     #[test]
     fn applies_depthwise_filter_per_channel() {
         let input = [
@@ -202,6 +211,9 @@ mod tests {
         );
     }
 
+    /// Verifies that kernel_size=1 degenerates to per-channel scaling (no history).
+    ///
+    /// This catches off-by-one in the tap loop boundary when kernel_size is minimal.
     #[test]
     fn kernel_size_one_is_per_channel_scaling() {
         let input = [
@@ -223,6 +235,9 @@ mod tests {
         );
     }
 
+    /// Verifies that the _into variant writes results into a pre-allocated buffer.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn conv1d_into_writes_existing_buffer() {
         let input = [
@@ -241,18 +256,27 @@ mod tests {
         approx_eq_slice(&output, &[1.0, 0.0, 3.0, 10.0]);
     }
 
+    /// Verifies that a zero-length sequence produces an empty output without error.
+    ///
+    /// This catches panics on empty input slices.
     #[test]
     fn empty_sequence_produces_empty_output() {
         let output = depthwise_causal_conv1d(&[], &[1.0, 2.0], Conv1dShape::new(0, 1, 2)).unwrap();
         assert!(output.is_empty());
     }
 
+    /// Verifies that zero channel_count is rejected as an invalid shape.
+    ///
+    /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
         let error = depthwise_causal_conv1d(&[], &[], Conv1dShape::new(1, 0, 1)).unwrap_err();
         assert_eq!(error, Conv1dError::InvalidShape(Conv1dShape::new(1, 0, 1)));
     }
 
+    /// Verifies that an input buffer shorter than expected is rejected.
+    ///
+    /// This catches missing input length validation.
     #[test]
     fn rejects_input_length_mismatch() {
         let error =
@@ -268,6 +292,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a weight buffer shorter than expected is rejected.
+    ///
+    /// This catches missing weight length validation.
     #[test]
     fn rejects_weight_length_mismatch() {
         let error =
@@ -283,6 +310,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small output buffer is rejected in the _into variant.
+    ///
+    /// This catches missing output length validation.
     #[test]
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 1];

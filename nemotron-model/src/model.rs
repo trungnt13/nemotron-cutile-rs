@@ -392,6 +392,11 @@ mod tests {
         LinearProjection::new_dense_f32(size, size, weights, None).unwrap()
     }
 
+    /// Verifies that a zero-block runtime (embedding → norm → identity LM head) produces
+    /// expected hidden states, logits, and argmax prediction for a two-token input.
+    ///
+    /// This catches regressions in the embedding lookup → rms_norm → linear projection
+    /// pipeline and the argmax prediction path.
     #[test]
     fn forward_tokens_runs_tiny_runtime() {
         let mut config = ModelConfig::default();
@@ -414,6 +419,12 @@ mod tests {
         assert_eq!(model.predict_next_token(&[0, 1]).unwrap(), 1);
     }
 
+    /// Verifies that transformer blocks are actually executed during the forward pass
+    /// by checking that a single MLP block transforms the logits away from a trivial
+    /// embedding-only result.
+    ///
+    /// This catches bugs where the block loop is accidentally skipped or cache
+    /// indexing prevents block execution.
     #[test]
     fn block_stack_is_applied() {
         let mut config = ModelConfig::default();
@@ -443,6 +454,9 @@ mod tests {
         approx_eq_slice(&output.logits, &[0.99999875]);
     }
 
+    /// Verifies that `forward_tokens` returns `MissingRuntime` when no runtime is attached.
+    ///
+    /// This catches regressions in the runtime-required guard at the start of forward.
     #[test]
     fn rejects_missing_runtime() {
         let model = NemotronModel::default();

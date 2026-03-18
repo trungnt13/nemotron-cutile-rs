@@ -190,6 +190,9 @@ mod tests {
         );
     }
 
+    /// Verifies that both RMSNorm kernels report HostFallback as their backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backends_for_now() {
         assert_eq!(
@@ -207,6 +210,9 @@ mod tests {
         );
     }
 
+    /// Verifies RMSNorm with unit weights against hand-computed reference values.
+    ///
+    /// This catches errors in the RMS denominator or normalization formula.
     #[test]
     fn rms_norm_matches_reference_values() {
         let output = rms_norm(&[1.0, 2.0], &[1.0, 1.0], 1e-5).unwrap();
@@ -215,6 +221,9 @@ mod tests {
         approx_eq(output[1], 1.2649086);
     }
 
+    /// Verifies that per-element weights scale the normalized output.
+    ///
+    /// This catches missing or swapped weight multiplication.
     #[test]
     fn rms_norm_applies_weights() {
         let output = rms_norm(&[1.0, 2.0], &[2.0, 0.5], 1e-5).unwrap();
@@ -223,6 +232,9 @@ mod tests {
         approx_eq(output[1], 0.6324543);
     }
 
+    /// Verifies that gated RMSNorm multiplies the gate vector after normalization.
+    ///
+    /// This catches missing gate multiplication or wrong application order.
     #[test]
     fn gated_rms_norm_multiplies_gate_after_normalization() {
         let output = gated_rms_norm(&[1.0, 2.0], &[1.0, 1.0], &[2.0, 0.5], 1e-5).unwrap();
@@ -231,6 +243,9 @@ mod tests {
         approx_eq(output[1], 0.6324543);
     }
 
+    /// Verifies that the in-place RMSNorm variant mutates the buffer correctly.
+    ///
+    /// This catches issues where in-place writes are skipped or mis-ordered.
     #[test]
     fn rms_norm_in_place_updates_buffer() {
         let mut values = [1.0, 2.0];
@@ -240,6 +255,9 @@ mod tests {
         approx_eq(values[1], 1.2649086);
     }
 
+    /// Verifies that the in-place gated RMSNorm variant mutates the buffer correctly.
+    ///
+    /// This catches issues where in-place writes are skipped or mis-ordered.
     #[test]
     fn gated_rms_norm_in_place_updates_buffer() {
         let mut values = [1.0, 2.0];
@@ -249,12 +267,18 @@ mod tests {
         approx_eq(values[1], 2.529817);
     }
 
+    /// Verifies that all-zero input produces all-zero output (0/sqrt(eps) * w * 0 = 0).
+    ///
+    /// This catches NaN or infinity from dividing zero by a near-zero RMS.
     #[test]
     fn zero_input_stays_zero() {
         let output = rms_norm(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0], 1e-5).unwrap();
         assert_eq!(output, vec![0.0, 0.0, 0.0]);
     }
 
+    /// Verifies that mismatched input/weight lengths are rejected.
+    ///
+    /// This catches missing weight length validation.
     #[test]
     fn rejects_length_mismatch() {
         let error = rms_norm(&[1.0, 2.0], &[1.0], 1e-5).unwrap_err();
@@ -268,6 +292,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a mismatched gate length is rejected.
+    ///
+    /// This catches missing gate length validation.
     #[test]
     fn rejects_gate_length_mismatch() {
         let error = gated_rms_norm(&[1.0, 2.0], &[1.0, 1.0], &[1.0], 1e-5).unwrap_err();
@@ -281,12 +308,18 @@ mod tests {
         );
     }
 
+    /// Verifies that a negative epsilon is rejected.
+    ///
+    /// This catches missing epsilon sign validation.
     #[test]
     fn rejects_negative_epsilon() {
         let error = rms_norm(&[1.0, 2.0], &[1.0, 1.0], -1.0).unwrap_err();
         assert_eq!(error, RmsNormError::NegativeEpsilon(-1.0));
     }
 
+    /// Verifies that empty input is rejected.
+    ///
+    /// This catches division by zero in the mean-square computation.
     #[test]
     fn rejects_empty_input() {
         let error = rms_norm(&[], &[], 1e-5).unwrap_err();

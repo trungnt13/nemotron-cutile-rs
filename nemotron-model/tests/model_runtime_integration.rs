@@ -86,6 +86,11 @@ fn constant_world_runtime() -> ModelRuntime {
     }
 }
 
+/// Verifies the full attach-runtime lifecycle: model starts with tokenizer only,
+/// attach_runtime enables forward pass, and summary reflects runtime state changes.
+///
+/// Fixture: 3-vocab, 2-hidden WordLevel tokenizer; constant LM head mapping all tokens to id=2.
+/// This catches regressions in runtime attachment, forward pass orchestration, and summary reporting.
 #[test]
 fn attach_runtime_enables_forward_pass_and_summary_updates() {
     let root = test_root("attach-runtime");
@@ -133,6 +138,11 @@ fn attach_runtime_enables_forward_pass_and_summary_updates() {
     fs::remove_dir_all(root).expect("test root should be removed");
 }
 
+/// Verifies that greedy generation stops at the EOS token (id=2, "world") and that
+/// `generation_preview` reports the generated text, token ids, and tokenizer status.
+///
+/// Fixture: 3-vocab WordLevel tokenizer (UNK=0, hello=1, world=2); LM head always predicts id=2.
+/// This catches regressions in EOS stopping, token accumulation, and decode-to-text.
 #[test]
 fn generate_stops_on_eos_and_preview_reports_generated_text() {
     let root = test_root("generate");

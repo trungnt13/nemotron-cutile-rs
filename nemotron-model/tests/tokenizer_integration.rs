@@ -37,6 +37,11 @@ fn write_test_tokenizer(path: &Path) {
         .expect("tokenizer should save to tokenizer.json");
 }
 
+/// Verifies that `ModelTokenizer::from_model_root` loads a tokenizer.json and that
+/// encode/decode round-trips correctly through the integration boundary.
+///
+/// Fixture: 3-vocab WordLevel tokenizer (UNK=0, hello=1, world=2).
+/// This catches regressions in the model-root path resolution and tokenizer I/O.
 #[test]
 fn loads_model_tokenizer_from_model_root() {
     let root = test_root("load");
@@ -63,6 +68,11 @@ fn loads_model_tokenizer_from_model_root() {
     fs::remove_dir_all(root).expect("test root should be removed");
 }
 
+/// Verifies that `NemotronModel::with_tokenizer_from_model_root` correctly wires the
+/// tokenizer for encode/decode and exposes special token ids from the config.
+///
+/// Fixture: 3-vocab WordLevel tokenizer with default ModelConfig (bos=1, eos=2, pad=0).
+/// This catches regressions in the model-level tokenizer delegation and special token plumbing.
 #[test]
 fn nemotron_model_uses_attached_tokenizer_for_text_roundtrip() {
     let root = test_root("model");
@@ -97,6 +107,10 @@ fn nemotron_model_uses_attached_tokenizer_for_text_roundtrip() {
     fs::remove_dir_all(root).expect("test root should be removed");
 }
 
+/// Verifies that `generation_preview` reports "tokenizer not loaded" and that
+/// `encode` returns `MissingTokenizer` when no tokenizer is attached.
+///
+/// This catches regressions in the preview's no-tokenizer branch and the encode guard.
 #[test]
 fn generation_preview_reports_tokenizer_state() {
     let model = NemotronModel::default();

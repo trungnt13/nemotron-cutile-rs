@@ -142,6 +142,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the GEMM kernel reports HostFallback as its backend.
+    ///
+    /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
     fn reports_host_fallback_backend_for_now() {
         assert_eq!(
@@ -153,6 +156,9 @@ mod tests {
         );
     }
 
+    /// Verifies 2×2 matrix multiplication against hand-computed results.
+    ///
+    /// This catches errors in the row/column accumulation loop.
     #[test]
     fn multiplies_square_matrices() {
         let lhs = [1.0, 2.0, 3.0, 4.0];
@@ -162,6 +168,9 @@ mod tests {
         approx_eq_slice(&output, &[19.0, 22.0, 43.0, 50.0]);
     }
 
+    /// Verifies GEMM with non-square dimensions (2×3 × 3×2 → 2×2).
+    ///
+    /// This catches indexing bugs that only appear with m ≠ k ≠ n.
     #[test]
     fn multiplies_rectangular_matrices() {
         let lhs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -171,6 +180,9 @@ mod tests {
         approx_eq_slice(&output, &[58.0, 64.0, 139.0, 154.0]);
     }
 
+    /// Verifies that multiplying by the identity matrix preserves the input.
+    ///
+    /// This catches systematic bias in the accumulation (e.g. forgotten zero-init).
     #[test]
     fn identity_matrix_preserves_input() {
         let lhs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
@@ -180,6 +192,9 @@ mod tests {
         approx_eq_slice(&output, &lhs);
     }
 
+    /// Verifies that f64 intermediate accumulation avoids f32 rounding drift.
+    ///
+    /// This catches accidental use of f32 accumulation in the inner loop.
     #[test]
     fn accumulates_in_f32_output_with_f64_intermediate() {
         let lhs = [0.1, 0.2, 0.3, 0.4];
@@ -189,6 +204,9 @@ mod tests {
         approx_eq_slice(&output, &[0.19, 0.22, 0.43, 0.50]);
     }
 
+    /// Verifies that the _into variant writes results into a pre-allocated buffer.
+    ///
+    /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
     fn gemm_into_writes_existing_buffer() {
         let lhs = [1.0, 2.0, 3.0, 4.0];
@@ -200,12 +218,18 @@ mod tests {
         approx_eq_slice(&output, &lhs);
     }
 
+    /// Verifies that a zero dimension (m=0) is rejected as an invalid shape.
+    ///
+    /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
         let error = gemm(&[1.0], &[1.0], GemmShape::new(0, 1, 1)).unwrap_err();
         assert_eq!(error, GemmError::InvalidShape(GemmShape::new(0, 1, 1)));
     }
 
+    /// Verifies that a too-short lhs buffer is rejected.
+    ///
+    /// This catches missing lhs length validation.
     #[test]
     fn rejects_lhs_length_mismatch() {
         let error = gemm(&[1.0], &[1.0, 2.0], GemmShape::new(1, 2, 1)).unwrap_err();
@@ -219,6 +243,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-short rhs buffer is rejected.
+    ///
+    /// This catches missing rhs length validation.
     #[test]
     fn rejects_rhs_length_mismatch() {
         let error = gemm(&[1.0, 2.0], &[1.0], GemmShape::new(1, 2, 1)).unwrap_err();
@@ -232,6 +259,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a too-small output buffer is rejected in the _into variant.
+    ///
+    /// This catches missing output length validation.
     #[test]
     fn rejects_output_length_mismatch() {
         let lhs = [1.0, 2.0];
