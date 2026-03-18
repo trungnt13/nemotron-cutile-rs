@@ -310,6 +310,9 @@ mod tests {
         LinearProjection::new_dense_f32(size, size, weights, None).unwrap()
     }
 
+    /// Verifies that an attention block produces output = residual + mixer(RMSNorm(input)).
+    ///
+    /// This catches broken residual connections or missing normalization.
     #[test]
     fn attention_block_adds_residual() {
         let attention = AttentionLayer::new(
@@ -336,6 +339,9 @@ mod tests {
             .any(|(out, input)| (out - input).abs() > 1e-6));
     }
 
+    /// Verifies that an MLP block adds the mixer output to the input residual.
+    ///
+    /// This catches broken residual addition or incorrect normalization wiring.
     #[test]
     fn mlp_block_adds_residual() {
         let mlp = MlpLayer::new_dense_relu2(1, 1, vec![1.0], None, vec![1.0], None).unwrap();
@@ -345,6 +351,9 @@ mod tests {
         approx_eq_slice(&output, &[3.0]);
     }
 
+    /// Verifies that a MoE-mixer block completes the full forward path with residual addition.
+    ///
+    /// This catches integration errors when routing through the MoE mixer variant.
     #[test]
     fn moe_block_runs() {
         let router = LinearProjection::new_dense_f32(1, 1, vec![1.0], None).unwrap();
@@ -356,6 +365,9 @@ mod tests {
         approx_eq_slice(&output, &[2.7310567]);
     }
 
+    /// Verifies that construction rejects a mixer whose hidden size doesn't match the block.
+    ///
+    /// This catches weakened hidden-size consistency checks in `NemotronBlock::new`.
     #[test]
     fn rejects_hidden_size_mismatch() {
         let mlp = MlpLayer::new_dense_relu2(1, 1, vec![1.0], None, vec![1.0], None).unwrap();

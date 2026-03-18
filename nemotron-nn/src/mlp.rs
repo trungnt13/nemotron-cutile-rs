@@ -306,6 +306,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the supported kernel list contains only the dense-ReLU²-host path.
+    ///
+    /// This catches accidental removal or duplication of MLP kernel entries.
     #[test]
     fn reports_dense_relu2_host_kernel_for_now() {
         assert_eq!(
@@ -318,6 +321,9 @@ mod tests {
         );
     }
 
+    /// Verifies the full MLP path: up-project → ReLU² → down-project + bias for two rows.
+    ///
+    /// This catches incorrect activation placement, wrong projection ordering, or bias errors.
     #[test]
     fn runs_dense_nemotron_style_path() {
         let layer = MlpLayer::new_dense_relu2(
@@ -337,6 +343,9 @@ mod tests {
         approx_eq_slice(&output, &[2.5, 4.25, -10.375, 1.125]);
     }
 
+    /// Verifies that forward_into overwrites a caller-provided buffer with ReLU²-activated results.
+    ///
+    /// This catches buffer reuse bugs where stale data leaks into the output.
     #[test]
     fn forward_into_writes_existing_output() {
         let layer = MlpLayer::new_dense_relu2(
@@ -357,6 +366,9 @@ mod tests {
         approx_eq_slice(&output, &[0.0, 9.0, 16.0, 0.0]);
     }
 
+    /// Verifies that construction rejects an up-projection whose shape doesn't match `MlpShape`.
+    ///
+    /// This catches weakened shape validation in `MlpLayer::new`.
     #[test]
     fn rejects_projection_shape_mismatches() {
         let up = LinearProjection::new_dense_f32(2, 4, vec![0.0; 8], None).unwrap();
@@ -374,6 +386,9 @@ mod tests {
         );
     }
 
+    /// Verifies that forward rejects int4-affine projections that lack a host-path kernel.
+    ///
+    /// This catches premature removal of the unsupported-weight guard.
     #[test]
     fn rejects_unsupported_non_dense_projection() {
         let params = Int4QuantizationParams::new(0.5, 8);
@@ -394,6 +409,9 @@ mod tests {
         );
     }
 
+    /// Verifies that forward rejects zero row_count, wrong input length, and wrong output length.
+    ///
+    /// This catches missing guards in `forward` and `forward_into` runtime validation.
     #[test]
     fn rejects_invalid_runtime_shapes() {
         let layer = MlpLayer::new_dense_relu2(

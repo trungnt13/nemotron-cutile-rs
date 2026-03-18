@@ -387,6 +387,9 @@ mod tests {
         LinearProjection::new_dense_f32(size, size, weights, None).unwrap()
     }
 
+    /// Verifies that self-attention with identity projections reproduces the raw kernel output.
+    ///
+    /// This catches incorrect projection wiring or shape mismatches between layer and kernel.
     #[test]
     fn self_attention_matches_kernel_when_projections_are_identity() {
         let layer = AttentionLayer::new(
@@ -422,6 +425,9 @@ mod tests {
         assert_eq!(layer.kernel(), GROUPED_QUERY_ATTENTION);
     }
 
+    /// Verifies that causal self-attention with identity projections reproduces the causal kernel output.
+    ///
+    /// This catches incorrect causal-mask propagation through `AttentionOptions`.
     #[test]
     fn causal_attention_matches_kernel_when_projections_are_identity() {
         let layer = AttentionLayer::new(
@@ -457,6 +463,9 @@ mod tests {
         approx_eq_slice(&actual, &expected);
     }
 
+    /// Verifies that construction rejects an output projection with wrong input dimensions.
+    ///
+    /// This catches weakened projection-shape validation in `AttentionLayer::new`.
     #[test]
     fn rejects_projection_shape_mismatch() {
         let error = AttentionLayer::new(
@@ -484,6 +493,9 @@ mod tests {
         );
     }
 
+    /// Verifies that forward rejects a query_states slice shorter than expected.
+    ///
+    /// This catches missing or incorrect hidden-state length validation.
     #[test]
     fn rejects_query_state_length_mismatch() {
         let layer = AttentionLayer::new(

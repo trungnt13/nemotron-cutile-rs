@@ -711,6 +711,10 @@ mod tests {
         .unwrap()
     }
 
+    /// Verifies that the full Mamba2 forward (project → conv1d → SiLU → SSM → gated-RMSNorm → out-project)
+    /// matches a manual step-by-step pipeline with kernel_size=1 (no conv prefix).
+    ///
+    /// This catches incorrect kernel composition ordering or shape wiring.
     #[test]
     fn forward_matches_manual_pipeline_without_cache() {
         let mixer = simple_mixer(1);
@@ -755,6 +759,9 @@ mod tests {
         approx_eq_slice(&actual, &expected);
     }
 
+    /// Verifies that incremental (cached) decode produces the same last-token output as a full-sequence forward.
+    ///
+    /// This catches conv-state or SSM-state update bugs that break autoregressive consistency.
     #[test]
     fn cache_keeps_decode_consistent_with_full_sequence() {
         let mixer = simple_mixer(2);
@@ -777,6 +784,9 @@ mod tests {
         assert_eq!(cache.ssm_state().len(), 1);
     }
 
+    /// Verifies that construction rejects a projection whose output dim doesn't match conv_channels.
+    ///
+    /// This catches weakened projection-shape validation in `Mamba2Mixer::new`.
     #[test]
     fn rejects_projection_shape_mismatch() {
         let error = Mamba2Mixer::new(
@@ -810,6 +820,9 @@ mod tests {
         );
     }
 
+    /// Verifies that forward rejects a cache whose batch_size doesn't match the forward shape.
+    ///
+    /// This catches missing or incorrect cache-shape validation.
     #[test]
     fn rejects_cache_shape_mismatch() {
         let mixer = simple_mixer(2);

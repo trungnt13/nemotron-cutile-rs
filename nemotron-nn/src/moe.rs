@@ -392,6 +392,9 @@ mod tests {
         MlpLayer::new_dense_relu2(1, 1, vec![1.0], None, vec![scale], None).unwrap()
     }
 
+    /// Verifies the full MoE path: router → sigmoid top-k → expert execution → weighted combination + shared expert.
+    ///
+    /// This catches incorrect routing weight application, expert selection, or shared-expert addition.
     #[test]
     fn combines_top_k_expert_outputs_and_shared_expert() {
         let layer = MoeLayer::new(
@@ -412,6 +415,9 @@ mod tests {
         assert_eq!(MOE_SIGMOID_TOPK.name, "moe_sigmoid_topk");
     }
 
+    /// Verifies that forward_into overwrites a caller-provided buffer with MoE results.
+    ///
+    /// This catches buffer reuse bugs or missing `output.fill(0.0)` before accumulation.
     #[test]
     fn writes_existing_output_buffer() {
         let layer = MoeLayer::new(
@@ -428,6 +434,9 @@ mod tests {
         approx_eq_slice(&output, &[0.95257413 * 4.0]);
     }
 
+    /// Verifies that construction rejects fewer experts than `expert_count` specifies.
+    ///
+    /// This catches weakened expert-count validation in `MoeLayer::new`.
     #[test]
     fn rejects_expert_count_mismatch() {
         let error = MoeLayer::new(
@@ -447,6 +456,9 @@ mod tests {
         );
     }
 
+    /// Verifies that construction rejects a router whose output dim doesn't match expert_count.
+    ///
+    /// This catches weakened router-shape validation in `MoeLayer::new`.
     #[test]
     fn rejects_router_shape_mismatch() {
         let error = MoeLayer::new(

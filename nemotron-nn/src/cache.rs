@@ -238,6 +238,9 @@ impl Error for CacheError {}
 mod tests {
     use super::*;
 
+    /// Verifies that two sequential appends accumulate keys/values and advance sequence_len.
+    ///
+    /// This catches off-by-one errors in `KvCache::append` or incorrect extend logic.
     #[test]
     fn appends_key_value_rows() {
         let mut cache = KvCache::new(KvCacheShape::new(1, 1, 2)).unwrap();
@@ -250,6 +253,9 @@ mod tests {
         assert_eq!(cache.values(), &[3.0, 4.0, 7.0, 8.0]);
     }
 
+    /// Verifies that clear resets sequence_len to 0 and empties key/value storage.
+    ///
+    /// This catches incomplete cache reset (e.g. clearing only one of keys/values).
     #[test]
     fn clear_resets_cache() {
         let mut cache = KvCache::new(KvCacheShape::new(1, 1, 1)).unwrap();
@@ -261,6 +267,9 @@ mod tests {
         assert!(cache.values().is_empty());
     }
 
+    /// Verifies that HybridCache can store heterogeneous Attention and Mamba caches by layer index.
+    ///
+    /// This catches incorrect layer-index routing in `set_attention`/`set_mamba`.
     #[test]
     fn hybrid_cache_stores_attention_and_mamba_entries() {
         let mut hybrid = HybridCache::new(2);
@@ -274,6 +283,9 @@ mod tests {
         assert_eq!(hybrid.layer(1).unwrap(), &LayerCache::Mamba(mamba));
     }
 
+    /// Verifies that append rejects a keys slice that is shorter than expected.
+    ///
+    /// This catches missing or weakened length validation in `KvCache::append`.
     #[test]
     fn rejects_length_mismatch_on_append() {
         let mut cache = KvCache::new(KvCacheShape::new(1, 1, 2)).unwrap();
@@ -289,6 +301,9 @@ mod tests {
         );
     }
 
+    /// Verifies that accessing an out-of-bounds layer index returns LayerOutOfBounds.
+    ///
+    /// This catches incorrect bounds checking in `HybridCache::layer`.
     #[test]
     fn rejects_invalid_layer_index() {
         let hybrid = HybridCache::new(1);

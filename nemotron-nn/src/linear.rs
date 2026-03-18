@@ -416,6 +416,9 @@ mod tests {
         }
     }
 
+    /// Verifies that the supported kernel list contains only the dense-f32 host path.
+    ///
+    /// This catches accidental removal or duplication of kernel entries.
     #[test]
     fn reports_dense_host_kernel_for_now() {
         assert_eq!(
@@ -428,6 +431,9 @@ mod tests {
         );
     }
 
+    /// Verifies that dense-f32 projection computes gemm + bias correctly for multiple rows.
+    ///
+    /// This catches incorrect weight layout, bias broadcasting, or gemm shape construction.
     #[test]
     fn projects_dense_weights_with_bias() {
         let layer = LinearProjection::new_dense_f32(
@@ -445,6 +451,9 @@ mod tests {
         approx_eq_slice(&output, &[-0.25, 0.75, -0.25, 2.75]);
     }
 
+    /// Verifies that project_into overwrites a caller-provided buffer when bias is absent.
+    ///
+    /// This catches buffer reuse bugs where stale data leaks into the output.
     #[test]
     fn project_into_writes_existing_output_without_bias() {
         let layer = LinearProjection::new_dense_f32(2, 2, vec![1.0, 0.0, 0.0, 1.0], None).unwrap();
@@ -457,6 +466,9 @@ mod tests {
         approx_eq_slice(&output, &[3.0, 1.0, 4.0, 1.0]);
     }
 
+    /// Verifies that int4-affine weights round-trip through quantize→dequantize losslessly.
+    ///
+    /// This catches incorrect packing/unpacking or scale/zero-point application.
     #[test]
     fn materializes_int4_weights_via_quantize_kernel() {
         let params = Int4QuantizationParams::new(0.5, 8);
@@ -469,6 +481,9 @@ mod tests {
         approx_eq_slice(&dense.values, &[0.5, 1.0, -0.5, 0.0]);
     }
 
+    /// Verifies that projecting with int4 weights returns UnsupportedWeights on the host path.
+    ///
+    /// This catches premature removal of the guard before a real int4 kernel is wired in.
     #[test]
     fn rejects_projecting_unsupported_int4_weights() {
         let params = Int4QuantizationParams::new(0.5, 8);
@@ -486,6 +501,9 @@ mod tests {
         );
     }
 
+    /// Verifies that construction rejects zero-dim shapes, wrong weight counts, and wrong bias length.
+    ///
+    /// This catches missing or weakened validation in `LinearProjection::from_shape`.
     #[test]
     fn rejects_invalid_projection_metadata() {
         let error = LinearProjection::new_dense_f32(0, 2, vec![], None).unwrap_err();
@@ -514,6 +532,9 @@ mod tests {
         );
     }
 
+    /// Verifies that int4-affine construction rejects invalid quantization params and wrong packed length.
+    ///
+    /// This catches errors in `Int4LinearWeights::validate` and `packed_int4_len` usage.
     #[test]
     fn rejects_invalid_quantized_weight_metadata() {
         let params = Int4QuantizationParams::new(0.0, 8);
@@ -537,6 +558,9 @@ mod tests {
         );
     }
 
+    /// Verifies that projection rejects zero row_count, wrong input length, and wrong output length.
+    ///
+    /// This catches missing guards in `project` and `project_into` runtime validation.
     #[test]
     fn rejects_invalid_runtime_shapes() {
         let layer = LinearProjection::new_dense_f32(2, 2, vec![1.0, 0.0, 0.0, 1.0], None).unwrap();
