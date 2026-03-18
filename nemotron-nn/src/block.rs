@@ -123,12 +123,20 @@ impl NemotronBlock {
                     },
                 )
                 .map_err(BlockError::Attention)?,
-            (BlockMixer::Mlp(layer), _) => layer.forward(&normalized, row_count).map_err(BlockError::Mlp)?,
-            (BlockMixer::Moe(layer), _) => layer.forward(&normalized, row_count).map_err(BlockError::Moe)?,
+            (BlockMixer::Mlp(layer), _) => layer
+                .forward(&normalized, row_count)
+                .map_err(BlockError::Mlp)?,
+            (BlockMixer::Moe(layer), _) => layer
+                .forward(&normalized, row_count)
+                .map_err(BlockError::Moe)?,
             (BlockMixer::Mamba(layer), Some(layer_cache)) => {
                 let mamba_cache = ensure_mamba_cache(layer_cache, layer, row_count)?;
                 layer
-                    .forward(&normalized, Mamba2ForwardShape::new(1, row_count), Some(mamba_cache))
+                    .forward(
+                        &normalized,
+                        Mamba2ForwardShape::new(1, row_count),
+                        Some(mamba_cache),
+                    )
                     .map_err(BlockError::Mamba)?
             }
             (BlockMixer::Mamba(layer), None) => layer
@@ -196,9 +204,7 @@ fn ensure_mamba_cache<'a>(
                 _ => unreachable!(),
             }
         }
-        LayerCache::Mamba(cache) => {
-            Ok(cache)
-        }
+        LayerCache::Mamba(cache) => Ok(cache),
         LayerCache::Attention(_) => Err(BlockError::CacheTypeMismatch("attention")),
     }
 }
@@ -243,18 +249,32 @@ pub enum BlockError {
 impl fmt::Display for BlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidHiddenSize(hidden_size) => write!(f, "hidden size must be non-zero, got {hidden_size}"),
-            Self::InvalidEpsilon(epsilon) => write!(f, "epsilon must be finite and non-negative, got {epsilon}"),
-            Self::InvalidRowCount(row_count) => write!(f, "row_count must be non-zero, got {row_count}"),
+            Self::InvalidHiddenSize(hidden_size) => {
+                write!(f, "hidden size must be non-zero, got {hidden_size}")
+            }
+            Self::InvalidEpsilon(epsilon) => {
+                write!(f, "epsilon must be finite and non-negative, got {epsilon}")
+            }
+            Self::InvalidRowCount(row_count) => {
+                write!(f, "row_count must be non-zero, got {row_count}")
+            }
             Self::LengthMismatch {
                 argument,
                 expected,
                 actual,
-            } => write!(f, "{argument} length mismatch: expected {expected}, got {actual}"),
+            } => write!(
+                f,
+                "{argument} length mismatch: expected {expected}, got {actual}"
+            ),
             Self::MixerHiddenSizeMismatch { expected, actual } => {
-                write!(f, "mixer hidden size mismatch: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "mixer hidden size mismatch: expected {expected}, got {actual}"
+                )
             }
-            Self::CacheTypeMismatch(cache_kind) => write!(f, "cache type mismatch: found {cache_kind} cache"),
+            Self::CacheTypeMismatch(cache_kind) => {
+                write!(f, "cache type mismatch: found {cache_kind} cache")
+            }
             Self::Norm(source) => write!(f, "norm failed: {source:?}"),
             Self::Attention(source) => write!(f, "attention failed: {source}"),
             Self::Mamba(source) => write!(f, "mamba failed: {source}"),
@@ -303,13 +323,17 @@ mod tests {
             identity_projection(2),
         )
         .unwrap();
-        let block = NemotronBlock::new(2, vec![1.0, 1.0], 1e-5, BlockMixer::Attention(attention)).unwrap();
+        let block =
+            NemotronBlock::new(2, vec![1.0, 1.0], 1e-5, BlockMixer::Attention(attention)).unwrap();
         let hidden_states = [1.0, 0.0, 0.0, 1.0];
 
         let output = block.forward(&hidden_states, 2, None).unwrap();
 
         assert_eq!(output.len(), hidden_states.len());
-        assert!(output.iter().zip(hidden_states).any(|(out, input)| (out - input).abs() > 1e-6));
+        assert!(output
+            .iter()
+            .zip(hidden_states)
+            .any(|(out, input)| (out - input).abs() > 1e-6));
     }
 
     #[test]

@@ -14,7 +14,11 @@ pub struct EmbeddingTable {
 }
 
 impl EmbeddingTable {
-    pub fn new(vocab_size: usize, hidden_size: usize, values: Vec<f32>) -> Result<Self, ModelForwardError> {
+    pub fn new(
+        vocab_size: usize,
+        hidden_size: usize,
+        values: Vec<f32>,
+    ) -> Result<Self, ModelForwardError> {
         let shape = EmbeddingShape::new(vocab_size, hidden_size);
         if values.len() != shape.table_len() {
             return Err(ModelForwardError::LengthMismatch {
@@ -109,14 +113,22 @@ impl fmt::Display for ModelForwardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingRuntime => f.write_str("model runtime is not loaded"),
-            Self::InvalidTokenId(token_id) => write!(f, "token id {token_id} is out of range for usize"),
+            Self::InvalidTokenId(token_id) => {
+                write!(f, "token id {token_id} is out of range for usize")
+            }
             Self::LengthMismatch {
                 argument,
                 expected,
                 actual,
-            } => write!(f, "{argument} length mismatch: expected {expected}, got {actual}"),
+            } => write!(
+                f,
+                "{argument} length mismatch: expected {expected}, got {actual}"
+            ),
             Self::Embedding(source) => write!(f, "embedding lookup failed: {source:?}"),
-            Self::Block { layer_index, source } => {
+            Self::Block {
+                layer_index,
+                source,
+            } => {
                 write!(f, "block {layer_index} failed: {source}")
             }
             Self::FinalNorm(source) => write!(f, "final norm failed: {source:?}"),
@@ -240,12 +252,20 @@ impl NemotronModel {
             .map_err(Into::into)
     }
 
-    pub fn forward_tokens(&self, token_ids: &[u32]) -> Result<ModelForwardOutput, ModelForwardError> {
-        let runtime = self.runtime.as_ref().ok_or(ModelForwardError::MissingRuntime)?;
+    pub fn forward_tokens(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<ModelForwardOutput, ModelForwardError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(ModelForwardError::MissingRuntime)?;
         let token_ids = token_ids
             .iter()
             .copied()
-            .map(|token_id| usize::try_from(token_id).map_err(|_| ModelForwardError::InvalidTokenId(token_id)))
+            .map(|token_id| {
+                usize::try_from(token_id).map_err(|_| ModelForwardError::InvalidTokenId(token_id))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut hidden_states = embedding_lookup(
@@ -257,7 +277,9 @@ impl NemotronModel {
 
         let mut cache = HybridCache::new(runtime.blocks.len());
         for (layer_index, block) in runtime.blocks.iter().enumerate() {
-            let layer_cache = cache.layer_mut(layer_index).expect("layer index is in bounds");
+            let layer_cache = cache
+                .layer_mut(layer_index)
+                .expect("layer index is in bounds");
             hidden_states = block
                 .forward(&hidden_states, token_ids.len(), Some(layer_cache))
                 .map_err(|source| ModelForwardError::Block {
@@ -304,8 +326,16 @@ impl NemotronModel {
             self.config.num_hidden_layers,
             self.config.hidden_size,
             self.config.vocab_size,
-            if self.has_tokenizer() { "loaded" } else { "unloaded" },
-            if self.has_runtime() { "loaded" } else { "unloaded" }
+            if self.has_tokenizer() {
+                "loaded"
+            } else {
+                "unloaded"
+            },
+            if self.has_runtime() {
+                "loaded"
+            } else {
+                "unloaded"
+            }
         )
     }
 

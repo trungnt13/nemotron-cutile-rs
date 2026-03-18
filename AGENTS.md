@@ -39,6 +39,38 @@ Keep docs **concise**, **intuitive**, and **reasoned**:
 
 Update documentation in the same commit as the code it describes — stale docs are worse than no docs because they actively mislead.
 
+## Workflow
+
+Every substantial task must follow this sequence unless the user explicitly asks for a narrower spike:
+
+1. **Research** — inspect the current code, references, constraints, and risks before changing implementation.
+2. **Plan** — write or update the design/execution plan before coding so scope, assumptions, blockers, and validation strategy are explicit.
+3. **Execution / Implementation** — make the code changes against that plan and keep the plan aligned when scope changes.
+4. **Alignment** — compare the implementation against the user prompt, reference behavior, and prior decisions; record mismatches or intentional deviations.
+5. **Verification** — run the relevant build, test, and validation commands and record the results before handoff.
+
+Do not skip straight to implementation for normal feature work. Start from research, then plan, then execute.
+
+## ai-docs Ownership
+
+`ai-docs/` is the shared design-document workspace for research notes, plans, execution summaries, alignment notes, and verification results.
+
+- Multi-agent work must use `ai-docs/` as the source of truth for handoff state.
+- Each agent must leave the docs in a better state than it found them: update status, decisions, blockers, commands run, and next actions.
+- When saving an execution record, include frontmatter with at least:
+
+```yaml
+---
+status:
+goal:
+prompt:
+created:
+finished:
+---
+```
+
+- Implementation should not begin until the relevant `ai-docs/` document captures research and plan context, unless the user explicitly directs otherwise. If that happens, document the deviation immediately.
+
 ## Project Context
 
 This is a Rust workspace (`resolver = "2"`, edition 2021) with five crates:

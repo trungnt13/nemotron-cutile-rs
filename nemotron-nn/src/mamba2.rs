@@ -2,9 +2,7 @@ use crate::{LayerStub, LinearError, LinearProjection};
 use nemotron_kernels::activations::silu_in_place;
 use nemotron_kernels::conv1d::{depthwise_causal_conv1d, Conv1dError, Conv1dShape};
 use nemotron_kernels::rms_norm::{gated_rms_norm, RmsNormError};
-use nemotron_kernels::ssm::{
-    selective_scan, SelectiveScanParams, SelectiveScanShape, SsmError,
-};
+use nemotron_kernels::ssm::{selective_scan, SelectiveScanParams, SelectiveScanShape, SsmError};
 use std::error::Error;
 use std::fmt;
 
@@ -108,8 +106,19 @@ impl Mamba2Mixer {
         direct_term: Option<Vec<f32>>,
         rms_norm_weight: Vec<f32>,
     ) -> Result<Self, Mamba2Error> {
-        validate_mamba_dims(hidden_size, conv_channels, state_size, conv_kernel_size, epsilon)?;
-        validate_projection("input_projection", &input_projection, hidden_size, conv_channels)?;
+        validate_mamba_dims(
+            hidden_size,
+            conv_channels,
+            state_size,
+            conv_kernel_size,
+            epsilon,
+        )?;
+        validate_projection(
+            "input_projection",
+            &input_projection,
+            hidden_size,
+            conv_channels,
+        )?;
         validate_projection(
             "delta_t_projection",
             &delta_t_projection,
@@ -128,8 +137,18 @@ impl Mamba2Mixer {
             hidden_size,
             conv_channels * state_size,
         )?;
-        validate_projection("gate_projection", &gate_projection, hidden_size, conv_channels)?;
-        validate_projection("output_projection", &output_projection, conv_channels, hidden_size)?;
+        validate_projection(
+            "gate_projection",
+            &gate_projection,
+            hidden_size,
+            conv_channels,
+        )?;
+        validate_projection(
+            "output_projection",
+            &output_projection,
+            conv_channels,
+            hidden_size,
+        )?;
 
         if conv_weights.len() != conv_channels * conv_kernel_size {
             return Err(Mamba2Error::LengthMismatch {
@@ -194,7 +213,13 @@ impl Mamba2Mixer {
         validate_hidden_states(hidden_states, shape.row_count(), self.hidden_size)?;
 
         if let Some(cache) = cache.as_ref() {
-            validate_cache(cache, shape.batch_size, self.conv_channels, self.conv_kernel_size, self.state_size)?;
+            validate_cache(
+                cache,
+                shape.batch_size,
+                self.conv_channels,
+                self.conv_kernel_size,
+                self.state_size,
+            )?;
         }
 
         let row_count = shape.row_count();
@@ -247,8 +272,9 @@ impl Mamba2Mixer {
             let conv_input = if conv_prefix_steps == 0 {
                 batch_input.to_vec()
             } else {
-                let mut values =
-                    Vec::with_capacity((conv_prefix_steps + shape.sequence_len) * self.conv_channels);
+                let mut values = Vec::with_capacity(
+                    (conv_prefix_steps + shape.sequence_len) * self.conv_channels,
+                );
                 if let Some(cache) = cache.as_ref() {
                     values.extend_from_slice(batch_conv_state_slice(
                         cache,
@@ -266,7 +292,11 @@ impl Mamba2Mixer {
             let conv_output = depthwise_causal_conv1d(
                 &conv_input,
                 &self.conv_weights,
-                Conv1dShape::new(conv_input.len() / self.conv_channels, self.conv_channels, self.conv_kernel_size),
+                Conv1dShape::new(
+                    conv_input.len() / self.conv_channels,
+                    self.conv_channels,
+                    self.conv_kernel_size,
+                ),
             )
             .map_err(Mamba2Error::Conv1d)?;
             let mut conv_activated =
@@ -275,10 +305,18 @@ impl Mamba2Mixer {
 
             let batch_delta_t =
                 batch_matrix_slice(&delta_t, batch, shape.sequence_len, self.conv_channels);
-            let batch_b =
-                batch_matrix_slice(&b, batch, shape.sequence_len, self.conv_channels * self.state_size);
-            let batch_c =
-                batch_matrix_slice(&c, batch, shape.sequence_len, self.conv_channels * self.state_size);
+            let batch_b = batch_matrix_slice(
+                &b,
+                batch,
+                shape.sequence_len,
+                self.conv_channels * self.state_size,
+            );
+            let batch_c = batch_matrix_slice(
+                &c,
+                batch,
+                shape.sequence_len,
+                self.conv_channels * self.state_size,
+            );
             let batch_gate =
                 batch_matrix_slice(&gate, batch, shape.sequence_len, self.conv_channels);
 
@@ -317,17 +355,14 @@ impl Mamba2Mixer {
                     source,
                 })?;
 
-            let output_batch = batch_matrix_slice_mut(
-                &mut output,
-                batch,
-                shape.sequence_len,
-                self.hidden_size,
-            );
+            let output_batch =
+                batch_matrix_slice_mut(&mut output, batch, shape.sequence_len, self.hidden_size);
             output_batch.copy_from_slice(&projected_output);
 
             if let Some(cache) = cache.as_deref_mut() {
                 if conv_prefix_steps > 0 {
-                    let updated_state = &conv_input[conv_input.len() - conv_prefix_steps * self.conv_channels..];
+                    let updated_state =
+                        &conv_input[conv_input.len() - conv_prefix_steps * self.conv_channels..];
                     batch_conv_state_slice_mut(cache, batch, self.conv_channels, conv_prefix_steps)
                         .copy_from_slice(updated_state);
                 }
@@ -449,7 +484,12 @@ fn validate_cache(
     Ok(())
 }
 
-fn batch_matrix_slice<'a>(values: &'a [f32], batch: usize, row_count: usize, width: usize) -> &'a [f32] {
+fn batch_matrix_slice<'a>(
+    values: &'a [f32],
+    batch: usize,
+    row_count: usize,
+    width: usize,
+) -> &'a [f32] {
     let start = batch * row_count * width;
     &values[start..start + row_count * width]
 }
@@ -633,7 +673,12 @@ mod tests {
         }
     }
 
-    fn dense_projection(input_dim: usize, output_dim: usize, weights: Vec<f32>, bias: Option<Vec<f32>>) -> LinearProjection {
+    fn dense_projection(
+        input_dim: usize,
+        output_dim: usize,
+        weights: Vec<f32>,
+        bias: Option<Vec<f32>>,
+    ) -> LinearProjection {
         LinearProjection::new_dense_f32(input_dim, output_dim, weights, bias).unwrap()
     }
 
@@ -673,7 +718,10 @@ mod tests {
         let shape = Mamba2ForwardShape::new(1, 2);
 
         let projected = mixer.input_projection.project(&hidden_states, 2).unwrap();
-        let conv = silu(&depthwise_causal_conv1d(&projected, &mixer.conv_weights, Conv1dShape::new(2, 1, 1)).unwrap());
+        let conv = silu(
+            &depthwise_causal_conv1d(&projected, &mixer.conv_weights, Conv1dShape::new(2, 1, 1))
+                .unwrap(),
+        );
         let dt = mixer.delta_t_projection.project(&hidden_states, 2).unwrap();
         let b = mixer.b_projection.project(&hidden_states, 2).unwrap();
         let c = mixer.c_projection.project(&hidden_states, 2).unwrap();
@@ -693,9 +741,14 @@ mod tests {
             SelectiveScanShape::new(2, 1, 1),
         )
         .unwrap();
-        let normalized =
-            gated_rms_norm_rows(&scan.values, &mixer.rms_norm_weight, &gate, 1, mixer.epsilon)
-                .unwrap();
+        let normalized = gated_rms_norm_rows(
+            &scan.values,
+            &mixer.rms_norm_weight,
+            &gate,
+            1,
+            mixer.epsilon,
+        )
+        .unwrap();
         let expected = mixer.output_projection.project(&normalized, 2).unwrap();
 
         let actual = mixer.forward(&hidden_states, shape, None).unwrap();
@@ -707,11 +760,17 @@ mod tests {
         let mixer = simple_mixer(2);
         let mut cache = Mamba2Cache::new_zeroed(1, 1, 2, 1);
 
-        let first = mixer.forward(&[1.0, 2.0], Mamba2ForwardShape::new(1, 2), Some(&mut cache)).unwrap();
+        let first = mixer
+            .forward(&[1.0, 2.0], Mamba2ForwardShape::new(1, 2), Some(&mut cache))
+            .unwrap();
         assert_eq!(first.len(), 2);
 
-        let next = mixer.forward(&[3.0], Mamba2ForwardShape::new(1, 1), Some(&mut cache)).unwrap();
-        let full = mixer.forward(&[1.0, 2.0, 3.0], Mamba2ForwardShape::new(1, 3), None).unwrap();
+        let next = mixer
+            .forward(&[3.0], Mamba2ForwardShape::new(1, 1), Some(&mut cache))
+            .unwrap();
+        let full = mixer
+            .forward(&[1.0, 2.0, 3.0], Mamba2ForwardShape::new(1, 3), None)
+            .unwrap();
 
         approx_eq_slice(&next, &full[2..3]);
         approx_eq_slice(cache.conv_state(), &[3.0]);

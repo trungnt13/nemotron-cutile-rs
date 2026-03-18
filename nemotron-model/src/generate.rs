@@ -34,7 +34,10 @@ impl GenerationRequest {
 }
 
 impl NemotronModel {
-    pub fn generate(&self, request: &GenerationRequest) -> Result<GenerationResult, GenerationError> {
+    pub fn generate(
+        &self,
+        request: &GenerationRequest,
+    ) -> Result<GenerationResult, GenerationError> {
         let prompt_token_ids = self
             .encode_with_special_tokens(&request.prompt, request.add_special_tokens)
             .map_err(GenerationError::Text)?;
@@ -73,15 +76,16 @@ impl NemotronModel {
 }
 
 pub fn generation_preview(model: &NemotronModel, request: &GenerationRequest) -> String {
-    let tokenizer_status = match model.encode_with_special_tokens(&request.prompt, request.add_special_tokens) {
-        Ok(token_ids) => format!(
-            "prompt_token_count: {}\nprompt_token_ids: {:?}\nstatus: tokenizer ready",
-            token_ids.len(),
-            token_ids
-        ),
-        Err(ModelTextError::MissingTokenizer) => "status: tokenizer not loaded".to_string(),
-        Err(error) => format!("status: tokenizer error ({error})"),
-    };
+    let tokenizer_status =
+        match model.encode_with_special_tokens(&request.prompt, request.add_special_tokens) {
+            Ok(token_ids) => format!(
+                "prompt_token_count: {}\nprompt_token_ids: {:?}\nstatus: tokenizer ready",
+                token_ids.len(),
+                token_ids
+            ),
+            Err(ModelTextError::MissingTokenizer) => "status: tokenizer not loaded".to_string(),
+            Err(error) => format!("status: tokenizer error ({error})"),
+        };
 
     let generation_status = match model.generate(request) {
         Ok(result) => format!(
@@ -160,6 +164,9 @@ mod tests {
             })
             .unwrap_err();
 
-        assert_eq!(result, GenerationError::Text(ModelTextError::MissingTokenizer));
+        assert_eq!(
+            result,
+            GenerationError::Text(ModelTextError::MissingTokenizer)
+        );
     }
 }

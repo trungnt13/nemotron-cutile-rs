@@ -5,7 +5,9 @@ pub use mamba2::{Mamba2Cache, Mamba2Error, Mamba2ForwardShape, Mamba2Mixer};
 pub use mlp::{
     supported_mlp_kernels, MlpBackend, MlpError, MlpKernel, MlpLayer, MlpShape, DENSE_RELU2_HOST,
 };
-pub use moe::{MlpShapeMismatch, MoeBackend, MoeError, MoeKernel, MoeLayer, MoeShape, MOE_DENSE_HOST};
+pub use moe::{
+    MlpShapeMismatch, MoeBackend, MoeError, MoeKernel, MoeLayer, MoeShape, MOE_DENSE_HOST,
+};
 pub mod attention;
 pub mod block;
 pub mod cache;

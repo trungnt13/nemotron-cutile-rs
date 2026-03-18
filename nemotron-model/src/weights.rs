@@ -154,11 +154,10 @@ impl WeightManifest {
             .ok_or_else(|| WeightError::TensorNotFound(name.to_string()))?;
         let absolute_path = self.root.join(&descriptor.relative_path);
 
-        let mut file = File::open(&absolute_path)
-            .map_err(|source| WeightError::Io {
-                path: absolute_path.clone(),
-                source,
-            })?;
+        let mut file = File::open(&absolute_path).map_err(|source| WeightError::Io {
+            path: absolute_path.clone(),
+            source,
+        })?;
         let header_length = read_header_length(&mut file, &absolute_path)?;
         let data_start = 8 + header_length as u64 + descriptor.data_offsets.0 as u64;
         let data_len = descriptor.data_offsets.1 - descriptor.data_offsets.0;
@@ -169,10 +168,11 @@ impl WeightManifest {
                 source,
             })?;
         let mut data = vec![0_u8; data_len];
-        file.read_exact(&mut data).map_err(|source| WeightError::Io {
-            path: absolute_path,
-            source,
-        })?;
+        file.read_exact(&mut data)
+            .map_err(|source| WeightError::Io {
+                path: absolute_path,
+                source,
+            })?;
 
         Ok(LoadedTensor {
             name: descriptor.name,
@@ -214,10 +214,11 @@ fn read_safetensors_header(path: &Path) -> Result<Vec<(String, RawTensorHeader)>
     })?;
     let header_length = read_header_length(&mut file, path)?;
     let mut header_bytes = vec![0_u8; header_length as usize];
-    file.read_exact(&mut header_bytes).map_err(|source| WeightError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    file.read_exact(&mut header_bytes)
+        .map_err(|source| WeightError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     let header_map: Map<String, Value> =
         serde_json::from_slice(&header_bytes).map_err(|source| WeightError::InvalidHeaderJson {
@@ -241,10 +242,11 @@ fn read_safetensors_header(path: &Path) -> Result<Vec<(String, RawTensorHeader)>
 
 fn read_header_length(file: &mut File, path: &Path) -> Result<u64, WeightError> {
     let mut prefix = [0_u8; 8];
-    file.read_exact(&mut prefix).map_err(|source| WeightError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    file.read_exact(&mut prefix)
+        .map_err(|source| WeightError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let header_length = u64::from_le_bytes(prefix);
     let total_length = file
         .metadata()
@@ -273,11 +275,13 @@ struct RawTensorHeader {
 
 impl RawTensorHeader {
     fn from_value(path: &Path, tensor_name: &str, value: Value) -> Result<Self, WeightError> {
-        let value = value.as_object().ok_or_else(|| WeightError::InvalidTensorHeader {
-            path: path.to_path_buf(),
-            tensor: tensor_name.to_string(),
-            reason: "tensor entry must be an object".to_string(),
-        })?;
+        let value = value
+            .as_object()
+            .ok_or_else(|| WeightError::InvalidTensorHeader {
+                path: path.to_path_buf(),
+                tensor: tensor_name.to_string(),
+                reason: "tensor entry must be an object".to_string(),
+            })?;
 
         let dtype = value
             .get("dtype")
@@ -299,14 +303,13 @@ impl RawTensorHeader {
             })?
             .iter()
             .map(|value| {
-                value
-                    .as_u64()
-                    .map(|dim| dim as usize)
-                    .ok_or_else(|| WeightError::InvalidTensorHeader {
+                value.as_u64().map(|dim| dim as usize).ok_or_else(|| {
+                    WeightError::InvalidTensorHeader {
                         path: path.to_path_buf(),
                         tensor: tensor_name.to_string(),
                         reason: "shape entries must be unsigned integers".to_string(),
-                    })
+                    }
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -451,7 +454,9 @@ impl fmt::Display for WeightError {
                 "invalid tensor header for {tensor} in {}: {reason}",
                 path.display()
             ),
-            Self::DuplicateTensorName(name) => write!(f, "duplicate tensor name in manifest: {name}"),
+            Self::DuplicateTensorName(name) => {
+                write!(f, "duplicate tensor name in manifest: {name}")
+            }
             Self::IndexMismatch {
                 tensor,
                 expected,
@@ -491,10 +496,7 @@ mod tests {
         std::env::temp_dir().join(format!("nemotron-weights-{name}-{suffix}"))
     }
 
-    fn write_safetensors_file(
-        path: &Path,
-        tensors: &[(&str, &str, &[usize], &[u8])],
-    ) {
+    fn write_safetensors_file(path: &Path, tensors: &[(&str, &str, &[usize], &[u8])]) {
         let mut offset = 0_usize;
         let mut header = Map::new();
         let mut data = Vec::new();
@@ -583,10 +585,7 @@ mod tests {
         let manifest = WeightManifest::from_root(&root).unwrap();
         assert_eq!(manifest.files.len(), 2);
         assert_eq!(
-            manifest
-                .tensor("layer1.weight")
-                .unwrap()
-                .relative_path,
+            manifest.tensor("layer1.weight").unwrap().relative_path,
             PathBuf::from("model-00002-of-00002.safetensors")
         );
 

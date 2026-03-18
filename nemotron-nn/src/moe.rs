@@ -1,8 +1,6 @@
 use crate::linear::{LinearError, LinearProjection, LinearShape, DENSE_F32_HOST};
 use crate::{LayerStub, MlpError, MlpLayer, MlpShape};
-use nemotron_kernels::moe_routing::{
-    moe_route, MoeRoutingError, MoeRoutingShape,
-};
+use nemotron_kernels::moe_routing::{moe_route, MoeRoutingError, MoeRoutingShape};
 use std::error::Error;
 use std::fmt;
 
@@ -89,11 +87,12 @@ impl MoeLayer {
         }
 
         for (expert_index, expert) in experts.iter().enumerate() {
-            validate_expert_shape("expert", expert.shape(), shape.hidden_dim)
-                .map_err(|source| MoeError::ExpertShapeMismatch {
+            validate_expert_shape("expert", expert.shape(), shape.hidden_dim).map_err(
+                |source| MoeError::ExpertShapeMismatch {
                     expert_index,
                     source,
-                })?;
+                },
+            )?;
         }
 
         if let Some(shared_expert) = shared_expert.as_ref() {
@@ -195,7 +194,11 @@ impl MoeLayer {
         output.fill(0.0);
         let mut expert_outputs = vec![None; self.shape.expert_count];
         let shared_output = if let Some(shared_expert) = self.shared_expert.as_ref() {
-            Some(shared_expert.forward(input, row_count).map_err(MoeError::SharedExpert)?)
+            Some(
+                shared_expert
+                    .forward(input, row_count)
+                    .map_err(MoeError::SharedExpert)?,
+            )
         } else {
             None
         };
@@ -246,7 +249,11 @@ impl MoeLayer {
 }
 
 fn validate_shape(shape: MoeShape) -> Result<(), MoeError> {
-    if shape.hidden_dim == 0 || shape.expert_count == 0 || shape.top_k == 0 || shape.top_k > shape.expert_count {
+    if shape.hidden_dim == 0
+        || shape.expert_count == 0
+        || shape.top_k == 0
+        || shape.top_k > shape.expert_count
+    {
         return Err(MoeError::InvalidShape(shape));
     }
 
@@ -372,7 +379,12 @@ mod tests {
         }
     }
 
-    fn dense_projection(input_dim: usize, output_dim: usize, weights: Vec<f32>, bias: Option<Vec<f32>>) -> LinearProjection {
+    fn dense_projection(
+        input_dim: usize,
+        output_dim: usize,
+        weights: Vec<f32>,
+        bias: Option<Vec<f32>>,
+    ) -> LinearProjection {
         LinearProjection::new_dense_f32(input_dim, output_dim, weights, bias).unwrap()
     }
 

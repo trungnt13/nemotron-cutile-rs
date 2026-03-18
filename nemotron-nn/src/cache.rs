@@ -157,20 +157,12 @@ impl HybridCache {
             })
     }
 
-    pub fn set_attention(
-        &mut self,
-        layer_index: usize,
-        cache: KvCache,
-    ) -> Result<(), CacheError> {
+    pub fn set_attention(&mut self, layer_index: usize, cache: KvCache) -> Result<(), CacheError> {
         *self.layer_mut(layer_index)? = LayerCache::Attention(cache);
         Ok(())
     }
 
-    pub fn set_mamba(
-        &mut self,
-        layer_index: usize,
-        cache: Mamba2Cache,
-    ) -> Result<(), CacheError> {
+    pub fn set_mamba(&mut self, layer_index: usize, cache: Mamba2Cache) -> Result<(), CacheError> {
         *self.layer_mut(layer_index)? = LayerCache::Mamba(cache);
         Ok(())
     }

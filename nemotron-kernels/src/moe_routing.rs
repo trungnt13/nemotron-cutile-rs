@@ -350,7 +350,9 @@ mod tests {
     #[test]
     fn routes_with_softmax_normalized_top_k_weights() {
         let output = moe_route_softmax(
-            &[0.4390189, 1.2967792, 2.4748528, 1.1023278, -1.263859, 0.51365805, 0.672, -0.11],
+            &[
+                0.4390189, 1.2967792, 2.4748528, 1.1023278, -1.263859, 0.51365805, 0.672, -0.11,
+            ],
             MoeRoutingShape::new(1, 8, 2),
         )
         .unwrap();
