@@ -1,0 +1,13 @@
+[package]
+name = "nemotron-cli"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "nemotron-cli"
+path = "src/main.rs"
+
+[dependencies]
+nemotron-model = { path = "../nemotron-model" }

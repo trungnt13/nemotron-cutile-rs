@@ -1,0 +1,6 @@
+[env]
+CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false, force = false }
+CUDA_PATH = { value = "/usr/local/cuda-13.2", relative = false, force = false }
+CUDA_TILE_USE_LLVM_INSTALL_DIR = { value = "/usr/lib/llvm-21", relative = false, force = false }
+LLVM_SYS_210_PREFIX = { value = "/usr/lib/llvm-21", relative = false, force = false }
+LLVM_CONFIG_PATH = { value = "/usr/lib/llvm-21/bin/llvm-config", relative = false, force = false }

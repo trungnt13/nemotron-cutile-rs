@@ -1,0 +1,16 @@
+[package]
+name = "nemotron-validate"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "nemotron-validate"
+path = "src/main.rs"
+
+[dependencies]
+nemotron-kernels = { path = "../nemotron-kernels" }
+nemotron-model = { path = "../nemotron-model" }
+serde.workspace = true
+serde_json.workspace = true

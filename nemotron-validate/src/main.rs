@@ -1,0 +1,309 @@
+use nemotron_kernels::activations::{relu2, silu};
+use nemotron_kernels::conv1d::{depthwise_causal_conv1d, Conv1dShape};
+use nemotron_kernels::gemm::{gemm, GemmShape};
+use nemotron_kernels::moe_routing::{moe_route_softmax, MoeRoutingShape};
+use nemotron_kernels::rms_norm::rms_norm;
+use nemotron_kernels::softmax::softmax;
+use nemotron_model::workspace_summary;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const DEFAULT_REFERENCE_DIR: &str = "data/reference_kernels";
+const DEFAULT_TOLERANCE: f32 = 1e-4;
+
+fn main() {
+    let reference_dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_REFERENCE_DIR));
+
+    println!("{}", workspace_summary());
+    println!("kernel validation root: {}", reference_dir.display());
+
+    match run_validation(&reference_dir) {
+        Ok(report) => {
+            for result in &report.results {
+                println!(
+                    "{}: {}{}",
+                    result.name,
+                    if result.passed { "PASS" } else { "FAIL" },
+                    result
+                        .detail
+                        .as_ref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default()
+                );
+            }
+
+            let passed = report.results.iter().filter(|result| result.passed).count();
+            println!("summary: {passed}/{} validations passed", report.results.len());
+            if !report.success() {
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("validation error: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ValidationReport {
+    results: Vec<ValidationResult>,
+}
+
+impl ValidationReport {
+    fn success(&self) -> bool {
+        self.results.iter().all(|result| result.passed)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ValidationResult {
+    name: &'static str,
+    passed: bool,
+    detail: Option<String>,
+}
+
+fn run_validation(reference_dir: &Path) -> Result<ValidationReport, String> {
+    let fixtures_path = reference_dir.join("fixtures.json");
+    let fixtures: BTreeMap<String, Value> = serde_json::from_slice(
+        &fs::read(&fixtures_path).map_err(|error| format!("failed to read {}: {error}", fixtures_path.display()))?,
+    )
+    .map_err(|error| format!("failed to parse {}: {error}", fixtures_path.display()))?;
+
+    let results = vec![
+        validate_gemm(fixtures.get("gemm").ok_or("missing gemm fixture")?)?,
+        validate_rms_norm(fixtures.get("rms_norm").ok_or("missing rms_norm fixture")?)?,
+        validate_softmax(fixtures.get("softmax").ok_or("missing softmax fixture")?)?,
+        validate_silu(fixtures.get("silu").ok_or("missing silu fixture")?)?,
+        validate_relu2(fixtures.get("relu2").ok_or("missing relu2 fixture")?)?,
+        validate_conv1d(fixtures.get("causal_conv1d").ok_or("missing causal_conv1d fixture")?)?,
+        validate_moe_routing(fixtures.get("moe_routing").ok_or("missing moe_routing fixture")?)?,
+    ];
+
+    Ok(ValidationReport { results })
+}
+
+fn validate_gemm(fixture: &Value) -> Result<ValidationResult, String> {
+    let a = flatten_f32(value_at(fixture, "a")?);
+    let b = flatten_f32(value_at(fixture, "b")?);
+    let expected = flatten_f32(value_at(fixture, "out")?);
+    let a_rows = array_len(value_at(fixture, "a")?);
+    let a_cols = array_len(&value_at(fixture, "a")?[0]);
+    let b_cols = array_len(&value_at(fixture, "b")?[0]);
+    let actual = gemm(&a, &b, GemmShape::new(a_rows, a_cols, b_cols)).map_err(|error| format!("{error:?}"))?;
+    Ok(compare_f32("gemm", &actual, &expected, DEFAULT_TOLERANCE))
+}
+
+fn validate_rms_norm(fixture: &Value) -> Result<ValidationResult, String> {
+    let x = flatten_f32(value_at(fixture, "x")?);
+    let weight = flatten_f32(value_at(fixture, "weight")?);
+    let expected = flatten_f32(value_at(fixture, "out")?);
+    let epsilon = fixture
+        .get("eps")
+        .and_then(Value::as_f64)
+        .ok_or("missing rms_norm eps")? as f32;
+    let row_width = weight.len();
+    let mut actual = Vec::with_capacity(x.len());
+    for row in x.chunks_exact(row_width) {
+        actual.extend(rms_norm(row, &weight, epsilon).map_err(|error| format!("{error:?}"))?);
+    }
+    Ok(compare_f32("rms_norm", &actual, &expected, 5e-4))
+}
+
+fn validate_softmax(fixture: &Value) -> Result<ValidationResult, String> {
+    let x = flatten_f32(value_at(fixture, "x")?);
+    let expected = flatten_f32(value_at(fixture, "out")?);
+    let row_width = last_dim_len(value_at(fixture, "x")?)?;
+    let mut actual = Vec::with_capacity(x.len());
+    for row in x.chunks_exact(row_width) {
+        actual.extend(softmax(row));
+    }
+    Ok(compare_f32("softmax", &actual, &expected, 5e-4))
+}
+
+fn validate_silu(fixture: &Value) -> Result<ValidationResult, String> {
+    let x = flatten_f32(value_at(fixture, "x")?);
+    let expected = flatten_f32(value_at(fixture, "out")?);
+    Ok(compare_f32("silu", &silu(&x), &expected, DEFAULT_TOLERANCE))
+}
+
+fn validate_relu2(fixture: &Value) -> Result<ValidationResult, String> {
+    let x = flatten_f32(value_at(fixture, "x")?);
+    let expected = flatten_f32(value_at(fixture, "out")?);
+    Ok(compare_f32("relu2", &relu2(&x), &expected, DEFAULT_TOLERANCE))
+}
+
+fn validate_conv1d(fixture: &Value) -> Result<ValidationResult, String> {
+    let input = flatten_f32(value_at(fixture, "x_bsd")?);
+    let weights = flatten_f32(value_at(fixture, "weight_d1k")?);
+    let bias = flatten_f32(value_at(fixture, "bias_d")?);
+    let expected = flatten_f32(value_at(fixture, "out_bsd")?);
+    let batch = array_len(value_at(fixture, "x_bsd")?);
+    let sequence_len = array_len(&value_at(fixture, "x_bsd")?[0]);
+    let channels = last_dim_len(value_at(fixture, "x_bsd")?)?;
+    let kernel_size = fixture
+        .get("kernel_size")
+        .and_then(Value::as_u64)
+        .ok_or("missing kernel_size")? as usize;
+
+    let mut actual = vec![0.0; input.len()];
+    let batch_stride = sequence_len * channels;
+    let flattened_weights = reshape_conv_weights(&weights, channels, kernel_size)?;
+    for batch_index in 0..batch {
+        let start = batch_index * batch_stride;
+        let end = start + batch_stride;
+        let mut batch_output = depthwise_causal_conv1d(
+            &input[start..end],
+            &flattened_weights,
+            Conv1dShape::new(sequence_len, channels, kernel_size),
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        for row in batch_output.chunks_exact_mut(channels) {
+            for (value, bias_value) in row.iter_mut().zip(bias.iter().copied()) {
+                *value += bias_value;
+            }
+        }
+        actual[start..end].copy_from_slice(&batch_output);
+    }
+
+    Ok(compare_f32("causal_conv1d", &actual, &expected, 5e-4))
+}
+
+fn validate_moe_routing(fixture: &Value) -> Result<ValidationResult, String> {
+    let logits = flatten_f32(value_at(fixture, "router_logits")?);
+    let expected_indices = flatten_usize(value_at(fixture, "topk_indices")?)?;
+    let expected_weights = flatten_f32(value_at(fixture, "topk_weights")?);
+    let token_count = array_len(value_at(fixture, "router_logits")?);
+    let expert_count = last_dim_len(value_at(fixture, "router_logits")?)?;
+    let top_k = fixture
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .ok_or("missing top_k")? as usize;
+    let actual = moe_route_softmax(&logits, MoeRoutingShape::new(token_count, expert_count, top_k))
+        .map_err(|error| format!("{error:?}"))?;
+
+    let indices_match = actual.indices == expected_indices;
+    let weights_report = compare_f32("moe_routing", &actual.weights, &expected_weights, 5e-4);
+    Ok(ValidationResult {
+        name: "moe_routing",
+        passed: indices_match && weights_report.passed,
+        detail: if indices_match && weights_report.passed {
+            None
+        } else {
+            Some(format!(
+                "indices_match={indices_match}, {}",
+                weights_report
+                    .detail
+                    .unwrap_or_else(|| "weights mismatch".to_string())
+            ))
+        },
+    })
+}
+
+fn compare_f32(name: &'static str, actual: &[f32], expected: &[f32], tolerance: f32) -> ValidationResult {
+    if actual.len() != expected.len() {
+        return ValidationResult {
+            name,
+            passed: false,
+            detail: Some(format!(
+                "length mismatch: actual={} expected={}",
+                actual.len(),
+                expected.len()
+            )),
+        };
+    }
+
+    let mut max_diff = 0.0_f32;
+    let mut max_index = 0_usize;
+    for (index, (actual_value, expected_value)) in actual.iter().zip(expected.iter()).enumerate() {
+        let diff = (actual_value - expected_value).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_index = index;
+        }
+    }
+
+    ValidationResult {
+        name,
+        passed: max_diff <= tolerance,
+        detail: if max_diff <= tolerance {
+            Some(format!("max_abs_diff={max_diff:.6}"))
+        } else {
+            Some(format!("max_abs_diff={max_diff:.6} at index {max_index}"))
+        },
+    }
+}
+
+fn value_at<'a>(value: &'a Value, key: &str) -> Result<&'a Value, String> {
+    value.get(key).ok_or_else(|| format!("missing key {key}"))
+}
+
+fn array_len(value: &Value) -> usize {
+    value.as_array().map(|array| array.len()).unwrap_or(0)
+}
+
+fn last_dim_len(value: &Value) -> Result<usize, String> {
+    let mut current = value;
+    while let Some(array) = current.as_array() {
+        if array.is_empty() {
+            return Err("encountered empty array while inferring shape".to_string());
+        }
+        if array.first().and_then(Value::as_array).is_none() {
+            return Ok(array.len());
+        }
+        current = &array[0];
+    }
+    Err("expected nested array".to_string())
+}
+
+fn flatten_f32(value: &Value) -> Vec<f32> {
+    let mut values = Vec::new();
+    flatten_f32_into(value, &mut values);
+    values
+}
+
+fn flatten_f32_into(value: &Value, output: &mut Vec<f32>) {
+    if let Some(array) = value.as_array() {
+        for item in array {
+            flatten_f32_into(item, output);
+        }
+    } else if let Some(number) = value.as_f64() {
+        output.push(number as f32);
+    }
+}
+
+fn flatten_usize(value: &Value) -> Result<Vec<usize>, String> {
+    let mut values = Vec::new();
+    flatten_usize_into(value, &mut values)?;
+    Ok(values)
+}
+
+fn flatten_usize_into(value: &Value, output: &mut Vec<usize>) -> Result<(), String> {
+    if let Some(array) = value.as_array() {
+        for item in array {
+            flatten_usize_into(item, output)?;
+        }
+        Ok(())
+    } else if let Some(number) = value.as_u64() {
+        output.push(number as usize);
+        Ok(())
+    } else {
+        Err("expected integer array".to_string())
+    }
+}
+
+fn reshape_conv_weights(weights: &[f32], channels: usize, kernel_size: usize) -> Result<Vec<f32>, String> {
+    if weights.len() != channels * kernel_size {
+        return Err(format!(
+            "conv weights length mismatch: actual={} expected={}",
+            weights.len(),
+            channels * kernel_size
+        ));
+    }
+    Ok(weights.to_vec())
+}
