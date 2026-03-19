@@ -1,5 +1,8 @@
 use crate::{array_len, flatten_f32, last_dim_len, value_at, DEFAULT_TOLERANCE};
 use nemotron_kernels::activations::{relu2, relu2_host, silu, silu_host};
+use nemotron_kernels::conv1d::{
+    depthwise_causal_conv1d, depthwise_causal_conv1d_host, Conv1dShape,
+};
 use nemotron_kernels::gemm::{gemm, gemm_host, GemmShape};
 use nemotron_kernels::rms_norm::{rms_norm, rms_norm_host};
 use nemotron_kernels::softmax::{softmax, softmax_host};
@@ -19,8 +22,12 @@ use std::time::Instant;
 const BENCHMARK_ITERATIONS: usize = 25;
 const E2E_TOLERANCE: f32 = 1e-5;
 const GEMM_ALIGNED_DIM: usize = 64;
-const GPU_WRAPPER_NOTE: &str = "Linux now runs real cutile device compute for RMSNorm, softmax on power-of-two flattened widths up to 4096, GEMM when shapes are aligned to its 16x16x8 tile requirements, and the elementwise activation wrappers (SiLU, ReLU², sigmoid) when their flattened width is also a supported power of two up to 4096. Remaining GPU wrapper paths still delegate to host kernels, and unsupported/non-Linux cases continue to use the host bridge.";
+const CONV1D_SEQUENCE_LEN: usize = 16;
+const CONV1D_CHANNEL_COUNT: usize = 16;
+const CONV1D_KERNEL_SIZE: usize = 4;
+const GPU_WRAPPER_NOTE: &str = "Linux now runs real cutile device compute for Conv1D when its internal im2col GEMM is 16x16x8-aligned, RMSNorm, softmax on power-of-two flattened widths up to 4096, GEMM when shapes are aligned to its 16x16x8 tile requirements, the elementwise activation wrappers (SiLU, ReLU², sigmoid) when their flattened width is a supported power of two up to 4096, and affine INT4 dequantize on supported power-of-two lengths. Remaining GPU wrapper paths still delegate to host kernels, and unsupported/non-Linux cases continue to use the host bridge.";
 const GEMM_BENCHMARK_NOTE: &str = "benchmark/gemm uses bundled fixtures, while benchmark/gemm-aligned exercises a synthetic 64x64x64 GEMM that can hit the real cutile kernel on Linux.";
+const CONV1D_BENCHMARK_NOTE: &str = "benchmark/causal_conv1d exercises a synthetic 16x16x4 depthwise shape whose internal 16x64x16 GEMM can hit the real cutile Conv1D path on Linux.";
 const MODEL_BENCHMARK_NOTE: &str = "Model-level benchmark uses the bundled synthetic e2e runtime to compare forward_tokens against forward_tokens_gpu.";
 
 #[derive(Clone, Debug)]
@@ -57,6 +64,7 @@ pub(crate) async fn run_benchmark_comparison(
         )
         .await?,
         benchmark_gemm_aligned(BENCHMARK_ITERATIONS).await?,
+        benchmark_conv1d_cutile_ready(BENCHMARK_ITERATIONS).await?,
         benchmark_rms_norm(
             kernel_fixtures
                 .get("rms_norm")
@@ -91,6 +99,7 @@ pub(crate) async fn run_benchmark_comparison(
         notes: vec![
             GPU_WRAPPER_NOTE.to_string(),
             GEMM_BENCHMARK_NOTE.to_string(),
+            CONV1D_BENCHMARK_NOTE.to_string(),
             MODEL_BENCHMARK_NOTE.to_string(),
         ],
     })
@@ -178,6 +187,50 @@ async fn benchmark_gemm_aligned(iterations: usize) -> Result<BenchmarkResult, St
         host_avg_ms,
         gpu_wrapper_avg_ms,
         DEFAULT_TOLERANCE,
+        iterations,
+    )
+}
+
+async fn benchmark_conv1d_cutile_ready(iterations: usize) -> Result<BenchmarkResult, String> {
+    let shape = Conv1dShape::new(
+        CONV1D_SEQUENCE_LEN,
+        CONV1D_CHANNEL_COUNT,
+        CONV1D_KERNEL_SIZE,
+    );
+    let input = (0..shape.input_len())
+        .map(|index| ((index % 19) as f32 - 9.0) * 0.125)
+        .collect::<Vec<_>>();
+    let weights = (0..shape.weight_len())
+        .map(|index| ((index % 11) as f32 - 5.0) * 0.0625)
+        .collect::<Vec<_>>();
+
+    let (host_output, host_avg_ms) = measure_sync(iterations, || {
+        depthwise_causal_conv1d_host(&input, &weights, shape).map_err(|error| format!("{error:?}"))
+    })?;
+    let (gpu_output, gpu_wrapper_avg_ms) = measure_async(iterations, || {
+        let input = &input;
+        let weights = &weights;
+        async move {
+            let gpu_input = GpuTensor::from_host(input, &[shape.sequence_len, shape.channel_count])
+                .map_err(|error| format!("{error:?}"))?;
+            let gpu_weights =
+                GpuTensor::from_host(weights, &[shape.channel_count, shape.kernel_size])
+                    .map_err(|error| format!("{error:?}"))?;
+            let output = depthwise_causal_conv1d(&gpu_input, &gpu_weights, shape)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            Ok(output.to_host())
+        }
+    })
+    .await?;
+
+    build_result(
+        "benchmark/causal_conv1d",
+        host_output,
+        gpu_output,
+        host_avg_ms,
+        gpu_wrapper_avg_ms,
+        5e-4,
         iterations,
     )
 }
@@ -552,8 +605,9 @@ mod tests {
             "benchmark comparisons should pass: {report:?}"
         );
         assert!(
-            report.notes.iter().any(|note| note
-                .contains("Linux now runs real cutile device compute for RMSNorm, softmax")),
+            report.notes.iter().any(|note| note.contains(
+                "Linux now runs real cutile device compute for Conv1D, RMSNorm, softmax"
+            )),
             "expected mixed real-compute note in benchmark report"
         );
         assert!(
@@ -569,6 +623,13 @@ mod tests {
                 .iter()
                 .any(|result| result.name == "benchmark/gemm-aligned"),
             "expected aligned gemm benchmark result"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|result| result.name == "benchmark/causal_conv1d"),
+            "expected conv1d benchmark result"
         );
         assert!(
             report
@@ -593,6 +654,20 @@ mod tests {
             result.passed,
             "aligned GEMM benchmark should preserve parity"
         );
+        assert_eq!(result.iterations, 1);
+    }
+
+    /// Verifies that the synthetic Conv1D benchmark runs without fixture files and preserves host-vs-wrapper parity.
+    ///
+    /// This catches regressions in the cutile-ready Conv1D benchmark hook itself.
+    #[tokio::test]
+    async fn conv1d_benchmark_runs_without_fixtures() {
+        let result = benchmark_conv1d_cutile_ready(1)
+            .await
+            .expect("conv1d benchmark should run");
+
+        assert_eq!(result.name, "benchmark/causal_conv1d");
+        assert!(result.passed, "conv1d benchmark should preserve parity");
         assert_eq!(result.iterations, 1);
     }
 }

@@ -85,12 +85,13 @@ fn benchmark_mode_reports_timings_and_parity() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(
         stdout.contains(
-            "benchmark note: Linux now runs real cutile device compute for RMSNorm, softmax"
+            "benchmark note: Linux now runs real cutile device compute for Conv1D, RMSNorm, softmax"
         ),
         "{stdout}"
     );
     assert!(stdout.contains("benchmark/gemm: PASS"), "{stdout}");
     assert!(stdout.contains("benchmark/gemm-aligned: PASS"), "{stdout}");
+    assert!(stdout.contains("benchmark/causal_conv1d: PASS"), "{stdout}");
     assert!(
         stdout.contains("benchmark/model/constant_world_runtime/forward_tokens: PASS"),
         "{stdout}"
