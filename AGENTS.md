@@ -13,7 +13,7 @@ Key design decisions:
 
 ```bash
 cargo build --workspace          # build all 5 crates
-cargo test  --workspace          # run all unit + integration tests (~204 passing, 1 ignored locally)
+cargo test  --workspace          # run all unit + integration tests (~204 passing, 1 ignored locally and on Linux/RTX 3090)
 cargo run -p nemotron-validate   # run kernel + E2E validation plus GPU-wrapper fixture checks (9/9 host, 7/7 GPU)
 cargo run -p nemotron-validate -- benchmark data/reference_kernels data/reference_outputs
 cargo run -p nemotron-cli -- "Hello, world!"  # generation preview
@@ -115,10 +115,10 @@ When adding a new kernel or layer:
 | Model runtime | ✅ Working | Config, tokenizer, weights, generation |
 | Kernel validation | ✅ 9/9 pass | Host fixture validation against bundled reference outputs |
 | GPU wrapper validation | ✅ 7/7 pass | Covers every bundled kernel fixture through async GPU wrappers |
-| Workspace tests | ✅ ~204 passing locally | Includes crate tests + integration tests; 1 doc test remains ignored |
-| GPU scaffolding (cutile) | ✅ Implemented | `GpuTensor`, `GpuDevice`, async kernel/nn/model wrapper paths compile and run on Linux/macOS |
+| Workspace tests | ✅ ~204 passing locally and on Linux/RTX 3090 | Includes crate tests + integration tests; 1 doc test remains ignored |
+| GPU scaffolding (cutile) | ✅ Implemented and validated on Linux | `GpuTensor`, `GpuDevice`, async kernel/nn/model wrapper paths compile and run on Linux/macOS |
 | Real cutile compute kernels | ⏳ Not started | Current wrapper math still delegates to host kernels after D2H/H2D transfer |
-| Benchmark mode | ✅ Local comparison mode | `nemotron-validate benchmark ...` reports host vs GPU-wrapper timing and parity |
+| Benchmark mode | ✅ Local + Linux comparison mode | `nemotron-validate benchmark ...` reports host vs GPU-wrapper timing and parity |
 | Full checkpoint loading | ⏳ Pending | Needs real AWQ model weights |
 | Layer-level validation | 🚫 Blocked | vLLM internals incompatible with fixture extraction |
 | CI/CD | ❌ None | No GitHub Actions — all testing is local |
