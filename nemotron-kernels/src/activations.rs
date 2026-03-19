@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "activations",
@@ -90,7 +90,6 @@ fn map_activation_in_place(values: &mut [f32], activation: fn(f32) -> f32) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Async GPU API
 // ---------------------------------------------------------------------------
@@ -120,7 +119,8 @@ pub async fn sigmoid(input: &GpuTensor) -> Result<GpuTensor, TensorError> {
 pub async fn silu_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
     let mut data = tensor.to_host_async().await?;
     silu_in_place_host(&mut data);
-    *tensor = GpuTensor::from_host_async(&data, tensor.shape()).await?;
+    let shape = tensor.shape().to_vec();
+    *tensor = GpuTensor::from_host_async(&data, &shape).await?;
     Ok(())
 }
 
@@ -128,7 +128,17 @@ pub async fn silu_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
 pub async fn relu2_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
     let mut data = tensor.to_host_async().await?;
     relu2_in_place_host(&mut data);
-    *tensor = GpuTensor::from_host_async(&data, tensor.shape()).await?;
+    let shape = tensor.shape().to_vec();
+    *tensor = GpuTensor::from_host_async(&data, &shape).await?;
+    Ok(())
+}
+
+/// Async GPU sigmoid in-place activation.
+pub async fn sigmoid_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
+    let mut data = tensor.to_host_async().await?;
+    sigmoid_in_place_host(&mut data);
+    let shape = tensor.shape().to_vec();
+    *tensor = GpuTensor::from_host_async(&data, &shape).await?;
     Ok(())
 }
 
@@ -242,4 +252,34 @@ mod tests {
         assert_eq!(result.to_host(), expected);
     }
 
+    /// Verifies that async GPU sigmoid preserves shape metadata when the input
+    /// tensor is multi-dimensional. This catches regressions in the sigmoid
+    /// wrapper's host-fallback bridge.
+    #[tokio::test]
+    async fn gpu_sigmoid_matches_host_fallback() {
+        let data = vec![-1.0, 0.0, 1.0, 2.0];
+        let expected = sigmoid_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[2, 2]).unwrap();
+
+        let result = super::sigmoid(&gpu_input).await.unwrap();
+
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.to_host(), expected);
+    }
+
+    /// Verifies that async GPU sigmoid-in-place preserves shape metadata when
+    /// mutating a tensor in place. This catches regressions where the bridge is
+    /// missing or reshapes the destination tensor.
+    #[tokio::test]
+    async fn gpu_sigmoid_in_place_matches_host_fallback() {
+        let data = vec![-1.0, 0.0, 1.0, 2.0];
+        let mut expected = data.clone();
+        sigmoid_in_place_host(&mut expected);
+        let mut gpu_tensor = GpuTensor::from_host(&data, &[2, 2]).unwrap();
+
+        super::sigmoid_in_place(&mut gpu_tensor).await.unwrap();
+
+        assert_eq!(gpu_tensor.shape(), &[2, 2]);
+        assert_eq!(gpu_tensor.to_host(), expected);
+    }
 }

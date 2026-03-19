@@ -10,14 +10,14 @@ prompt: >-
   needed, run focused validation if code changes, and note anything relevant for
   downstream GPU validation or benchmarking work.
 created: 2026-03-19T09:45:10Z
-finished: 2026-03-19T09:45:10Z
+finished: 2026-03-19T09:51:23Z
 ---
 
 # Executed Plan — Audit Basic Kernel Wrappers
 
 ## Summary
 
-Audited the four simple async GPU wrapper modules. The wrappers still intentionally use the D2H -> CPU kernel -> H2D path, so they remain correctness bridges rather than performance paths. The main contract issue found was `gemm_into`, which previously discarded the caller-provided output tensor instead of honoring `_into` semantics.
+Audited the four simple async GPU wrapper modules and then synced the audit with actual code changes after a follow-up check showed only the audit doc had landed. The wrappers still intentionally use the D2H -> CPU kernel -> H2D path, so they remain correctness bridges rather than performance paths. The main contract issue found was `gemm_into`, which previously discarded the caller-provided output tensor instead of honoring `_into` semantics.
 
 ## Research and Findings
 
@@ -51,7 +51,7 @@ Audited the four simple async GPU wrapper modules. The wrappers still intentiona
 ## Verification
 
 - Baseline before changes: `cargo test -p nemotron-kernels --quiet` ✅ (116 passed, 1 ignored doc/integration placeholder)
-- After changes: `cargo test -p nemotron-kernels --quiet` ✅ (127 passed, 1 ignored doc/integration placeholder)
+- After landing the wrapper fixes: `cargo test -p nemotron-kernels --quiet` ✅ (132 passed, 1 ignored doc/integration placeholder)
 
 ## Downstream Notes
 

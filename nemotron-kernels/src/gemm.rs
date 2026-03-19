@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "gemm_host",
@@ -118,6 +118,34 @@ fn validate_shape(
     Ok(())
 }
 
+fn validate_tensor_lengths(
+    lhs: &GpuTensor,
+    rhs: &GpuTensor,
+    shape: GemmShape,
+) -> Result<(), GemmError> {
+    if shape.m == 0 || shape.k == 0 || shape.n == 0 {
+        return Err(GemmError::InvalidShape(shape));
+    }
+
+    if lhs.numel() != shape.lhs_len() {
+        return Err(GemmError::LengthMismatch {
+            argument: "lhs",
+            expected: shape.lhs_len(),
+            actual: lhs.numel(),
+        });
+    }
+
+    if rhs.numel() != shape.rhs_len() {
+        return Err(GemmError::LengthMismatch {
+            argument: "rhs",
+            expected: shape.rhs_len(),
+            actual: rhs.numel(),
+        });
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GemmError {
     InvalidShape(GemmShape),
@@ -129,13 +157,11 @@ pub enum GemmError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for GemmError {
     fn from(e: TensorError) -> Self {
         GemmError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -143,11 +169,17 @@ impl From<TensorError> for GemmError {
 
 /// Async GPU matrix multiplication. On Linux+CUDA dispatches to a cutile
 /// tile kernel; elsewhere delegates to the host fallback.
-pub async fn gemm(lhs: &GpuTensor, rhs: &GpuTensor, shape: GemmShape) -> Result<GpuTensor, GemmError> {
+pub async fn gemm(
+    lhs: &GpuTensor,
+    rhs: &GpuTensor,
+    shape: GemmShape,
+) -> Result<GpuTensor, GemmError> {
+    validate_tensor_lengths(lhs, rhs, shape)?;
     let lhs_data = lhs.to_host_async().await?;
     let rhs_data = rhs.to_host_async().await?;
     let result = gemm_host(&lhs_data, &rhs_data, shape)?;
-    Ok(GpuTensor::from_host_async(&result, &[shape.m, shape.n]).await?)
+    let output_shape = [shape.m, shape.n];
+    Ok(GpuTensor::from_host_async(&result, &output_shape).await?)
 }
 
 /// Async GPU matrix multiplication writing into an existing tensor.
@@ -157,8 +189,22 @@ pub async fn gemm_into(
     shape: GemmShape,
     output: &mut GpuTensor,
 ) -> Result<(), GemmError> {
-    let result = gemm(lhs, rhs, shape).await?;
-    *output = result;
+    validate_tensor_lengths(lhs, rhs, shape)?;
+
+    if output.numel() != shape.output_len() {
+        return Err(GemmError::LengthMismatch {
+            argument: "output",
+            expected: shape.output_len(),
+            actual: output.numel(),
+        });
+    }
+
+    let lhs_data = lhs.to_host_async().await?;
+    let rhs_data = rhs.to_host_async().await?;
+    let output_shape = output.shape().to_vec();
+    let mut host_output = vec![0.0; output.numel()];
+    gemm_into_host(&lhs_data, &rhs_data, shape, &mut host_output)?;
+    *output = GpuTensor::from_host_async(&host_output, &output_shape).await?;
     Ok(())
 }
 
@@ -328,4 +374,50 @@ mod tests {
         assert_eq!(result.to_host(), expected);
     }
 
+    /// Verifies that async GPU GEMM-into preserves the destination shape when the
+    /// output tensor has the correct element count. This catches regressions
+    /// where the wrapper silently reshapes caller-owned tensors.
+    #[tokio::test]
+    async fn gpu_gemm_into_preserves_existing_output_shape() {
+        let lhs = vec![1.0, 2.0, 3.0, 4.0];
+        let rhs = vec![1.0, 0.0, 0.0, 1.0];
+        let shape = GemmShape::new(2, 2, 2);
+        let expected = gemm_host(&lhs, &rhs, shape).unwrap();
+        let gpu_lhs = GpuTensor::from_host(&lhs, &[2, 2]).unwrap();
+        let gpu_rhs = GpuTensor::from_host(&rhs, &[2, 2]).unwrap();
+        let mut output = GpuTensor::zeros(&[1, 4]).unwrap();
+
+        super::gemm_into(&gpu_lhs, &gpu_rhs, shape, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(output.shape(), &[1, 4]);
+        assert_eq!(output.to_host(), expected);
+    }
+
+    /// Verifies that async GPU GEMM-into rejects a mismatched output tensor when
+    /// its element count is wrong. This catches regressions where the wrapper
+    /// silently replaces invalid outputs instead of matching host validation.
+    #[tokio::test]
+    async fn gpu_gemm_into_rejects_output_length_mismatch() {
+        let lhs = vec![1.0, 2.0, 3.0, 4.0];
+        let rhs = vec![1.0, 0.0, 0.0, 1.0];
+        let shape = GemmShape::new(2, 2, 2);
+        let gpu_lhs = GpuTensor::from_host(&lhs, &[2, 2]).unwrap();
+        let gpu_rhs = GpuTensor::from_host(&rhs, &[2, 2]).unwrap();
+        let mut output = GpuTensor::zeros(&[3]).unwrap();
+
+        let error = super::gemm_into(&gpu_lhs, &gpu_rhs, shape, &mut output)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            GemmError::LengthMismatch {
+                argument: "output",
+                expected: 4,
+                actual: 3,
+            }
+        );
+    }
 }

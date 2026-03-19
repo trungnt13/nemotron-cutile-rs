@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "rms_norm_host",
@@ -32,7 +32,11 @@ pub fn supported_rms_norm_kernels() -> [RmsNormKernel; 2] {
     [RMS_NORM, GATED_RMS_NORM]
 }
 
-pub fn rms_norm_host(input: &[f32], weight: &[f32], epsilon: f32) -> Result<Vec<f32>, RmsNormError> {
+pub fn rms_norm_host(
+    input: &[f32],
+    weight: &[f32],
+    epsilon: f32,
+) -> Result<Vec<f32>, RmsNormError> {
     let mut output = vec![0.0; input.len()];
     rms_norm_into_host(input, weight, epsilon, &mut output)?;
     Ok(output)
@@ -168,6 +172,41 @@ fn validate_lengths(
     Ok(())
 }
 
+fn validate_tensor_lengths(
+    input: &GpuTensor,
+    weight: &GpuTensor,
+    gate: Option<&GpuTensor>,
+    epsilon: f32,
+) -> Result<(), RmsNormError> {
+    if input.numel() == 0 {
+        return Err(RmsNormError::EmptyInput);
+    }
+
+    if epsilon < 0.0 {
+        return Err(RmsNormError::NegativeEpsilon(epsilon));
+    }
+
+    if input.numel() != weight.numel() {
+        return Err(RmsNormError::LengthMismatch {
+            expected: input.numel(),
+            actual: weight.numel(),
+            argument: "weight",
+        });
+    }
+
+    if let Some(gate) = gate {
+        if input.numel() != gate.numel() {
+            return Err(RmsNormError::LengthMismatch {
+                expected: input.numel(),
+                actual: gate.numel(),
+                argument: "gate",
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum RmsNormError {
     EmptyInput,
@@ -180,13 +219,11 @@ pub enum RmsNormError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for RmsNormError {
     fn from(e: TensorError) -> Self {
         RmsNormError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -198,6 +235,7 @@ pub async fn rms_norm(
     weight: &GpuTensor,
     epsilon: f32,
 ) -> Result<GpuTensor, RmsNormError> {
+    validate_tensor_lengths(input, weight, None, epsilon)?;
     let input_data = input.to_host_async().await?;
     let weight_data = weight.to_host_async().await?;
     let result = rms_norm_host(&input_data, &weight_data, epsilon)?;
@@ -211,6 +249,7 @@ pub async fn gated_rms_norm(
     gate: &GpuTensor,
     epsilon: f32,
 ) -> Result<GpuTensor, RmsNormError> {
+    validate_tensor_lengths(input, weight, Some(gate), epsilon)?;
     let input_data = input.to_host_async().await?;
     let weight_data = weight.to_host_async().await?;
     let gate_data = gate.to_host_async().await?;
@@ -376,8 +415,55 @@ mod tests {
         let expected = rms_norm_host(&input, &weight, epsilon).unwrap();
         let gpu_input = GpuTensor::from_host(&input, &[4]).unwrap();
         let gpu_weight = GpuTensor::from_host(&weight, &[4]).unwrap();
-        let result = super::rms_norm(&gpu_input, &gpu_weight, epsilon).await.unwrap();
+        let result = super::rms_norm(&gpu_input, &gpu_weight, epsilon)
+            .await
+            .unwrap();
         assert_eq!(result.to_host(), expected);
     }
 
+    /// Verifies that async GPU gated RMSNorm preserves the input shape when the
+    /// gate and weight lengths match. This catches regressions in the gated
+    /// bridge path and output-shape reconstruction.
+    #[tokio::test]
+    async fn gpu_gated_rms_norm_matches_host_fallback() {
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let weight = vec![0.5, 1.0, 1.5, 2.0];
+        let gate = vec![1.0, 0.5, 2.0, 1.5];
+        let epsilon = 1e-5;
+        let expected = gated_rms_norm_host(&input, &weight, &gate, epsilon).unwrap();
+        let gpu_input = GpuTensor::from_host(&input, &[2, 2]).unwrap();
+        let gpu_weight = GpuTensor::from_host(&weight, &[1, 4]).unwrap();
+        let gpu_gate = GpuTensor::from_host(&gate, &[4]).unwrap();
+
+        let result = super::gated_rms_norm(&gpu_input, &gpu_weight, &gpu_gate, epsilon)
+            .await
+            .unwrap();
+
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.to_host(), expected);
+    }
+
+    /// Verifies that async GPU RMSNorm rejects mismatched weights when the
+    /// wrapper sees incompatible tensor lengths. This catches regressions where
+    /// invalid tensors are transferred instead of failing fast.
+    #[tokio::test]
+    async fn gpu_rms_norm_rejects_weight_length_mismatch() {
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let weight = vec![1.0, 2.0];
+        let gpu_input = GpuTensor::from_host(&input, &[2, 2]).unwrap();
+        let gpu_weight = GpuTensor::from_host(&weight, &[2]).unwrap();
+
+        let error = super::rms_norm(&gpu_input, &gpu_weight, 1e-5)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RmsNormError::LengthMismatch {
+                expected: 4,
+                actual: 2,
+                argument: "weight",
+            }
+        );
+    }
 }

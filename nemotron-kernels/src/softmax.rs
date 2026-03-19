@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "softmax_host",
@@ -79,13 +79,11 @@ pub enum SoftmaxError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for SoftmaxError {
     fn from(e: TensorError) -> Self {
         SoftmaxError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -93,11 +91,9 @@ impl From<TensorError> for SoftmaxError {
 
 /// Async GPU softmax normalization.
 pub async fn softmax(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
-    let data = input.to_host_async().await.map_err(|e| SoftmaxError::DeviceError(e.to_string()))?;
+    let data = input.to_host_async().await?;
     let result = softmax_host(&data);
-    GpuTensor::from_host_async(&result, input.shape())
-        .await
-        .map_err(|e| SoftmaxError::DeviceError(e.to_string()))
+    Ok(GpuTensor::from_host_async(&result, input.shape()).await?)
 }
 
 #[cfg(test)]
@@ -210,4 +206,18 @@ mod tests {
         assert_eq!(result.to_host(), expected);
     }
 
+    /// Verifies that async GPU softmax preserves the input shape when the
+    /// tensor has higher-rank metadata. This catches regressions where the
+    /// wrapper flattens tensor metadata during host fallback.
+    #[tokio::test]
+    async fn gpu_softmax_preserves_input_shape() {
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let expected = softmax_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[2, 2]).unwrap();
+
+        let result = super::softmax(&gpu_input).await.unwrap();
+
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.to_host(), expected);
+    }
 }
