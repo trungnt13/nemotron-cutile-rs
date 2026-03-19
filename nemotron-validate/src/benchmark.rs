@@ -589,7 +589,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Verifies that benchmark comparisons load the bundled fixtures and preserve host-vs-wrapper parity while including the synthetic aligned GEMM benchmark. This catches regressions in benchmark fixture loading, timing harness execution, and GEMM-specific reporting.
+    /// Verifies that benchmark comparisons load the bundled fixtures, preserve host-vs-wrapper parity, and report the mixed real-compute benchmark note plus synthetic aligned benchmarks.
+    /// This catches regressions in benchmark fixture loading, timing harness execution, and benchmark-report messaging as more real cutile kernels land.
     #[tokio::test]
     async fn bundled_benchmark_comparison_runs() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -605,9 +606,11 @@ mod tests {
             "benchmark comparisons should pass: {report:?}"
         );
         assert!(
-            report.notes.iter().any(|note| note.contains(
-                "Linux now runs real cutile device compute for Conv1D, RMSNorm, softmax"
-            )),
+            report.notes.iter().any(|note| {
+                note.contains("Linux now runs real cutile device compute for Conv1D")
+                    && note.contains("sigmoid MoE routing")
+                    && note.contains("affine INT4 dequantize")
+            }),
             "expected mixed real-compute note in benchmark report"
         );
         assert!(

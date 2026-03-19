@@ -84,9 +84,9 @@ fn benchmark_mode_reports_timings_and_parity() {
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(
-        stdout.contains(
-            "benchmark note: Linux now runs real cutile device compute for Conv1D, RMSNorm, softmax"
-        ),
+        stdout.contains("benchmark note: Linux now runs real cutile device compute for Conv1D")
+            && stdout.contains("sigmoid MoE routing")
+            && stdout.contains("affine INT4 dequantize"),
         "{stdout}"
     );
     assert!(stdout.contains("benchmark/gemm: PASS"), "{stdout}");
