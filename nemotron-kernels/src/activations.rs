@@ -2,7 +2,7 @@ use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "activations",
-    summary: "SiLU, sigmoid, and ReLU² GPU kernels.",
+    summary: "SiLU, sigmoid_host, and ReLU² GPU kernels.",
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,17 +18,17 @@ pub struct ActivationKernel {
 }
 
 pub const SILU: ActivationKernel = ActivationKernel {
-    name: "silu",
+    name: "silu_host",
     backend: ActivationBackend::HostFallback,
 };
 
 pub const RELU2: ActivationKernel = ActivationKernel {
-    name: "relu2",
+    name: "relu2_host",
     backend: ActivationBackend::HostFallback,
 };
 
 pub const SIGMOID: ActivationKernel = ActivationKernel {
-    name: "sigmoid",
+    name: "sigmoid_host",
     backend: ActivationBackend::HostFallback,
 };
 
@@ -55,27 +55,27 @@ pub fn sigmoid_scalar(x: f32) -> f32 {
     }
 }
 
-pub fn silu(values: &[f32]) -> Vec<f32> {
+pub fn silu_host(values: &[f32]) -> Vec<f32> {
     map_activation(values, silu_scalar)
 }
 
-pub fn relu2(values: &[f32]) -> Vec<f32> {
+pub fn relu2_host(values: &[f32]) -> Vec<f32> {
     map_activation(values, relu2_scalar)
 }
 
-pub fn sigmoid(values: &[f32]) -> Vec<f32> {
+pub fn sigmoid_host(values: &[f32]) -> Vec<f32> {
     map_activation(values, sigmoid_scalar)
 }
 
-pub fn silu_in_place(values: &mut [f32]) {
+pub fn silu_in_place_host(values: &mut [f32]) {
     map_activation_in_place(values, silu_scalar);
 }
 
-pub fn relu2_in_place(values: &mut [f32]) {
+pub fn relu2_in_place_host(values: &mut [f32]) {
     map_activation_in_place(values, relu2_scalar);
 }
 
-pub fn sigmoid_in_place(values: &mut [f32]) {
+pub fn sigmoid_in_place_host(values: &mut [f32]) {
     map_activation_in_place(values, sigmoid_scalar);
 }
 
@@ -110,24 +110,24 @@ mod tests {
             supported_activations(),
             [
                 ActivationKernel {
-                    name: "silu",
+                    name: "silu_host",
                     backend: ActivationBackend::HostFallback,
                 },
                 ActivationKernel {
-                    name: "relu2",
+                    name: "relu2_host",
                     backend: ActivationBackend::HostFallback,
                 },
                 ActivationKernel {
-                    name: "sigmoid",
+                    name: "sigmoid_host",
                     backend: ActivationBackend::HostFallback,
                 },
             ]
         );
     }
 
-    /// Verifies sigmoid at zero, positive, and negative inputs against known values.
+    /// Verifies sigmoid_host at zero, positive, and negative inputs against known values.
     ///
-    /// This catches regressions in the numerically stable split-branch sigmoid.
+    /// This catches regressions in the numerically stable split-branch sigmoid_host.
     #[test]
     fn sigmoid_matches_reference_values() {
         approx_eq(sigmoid_scalar(0.0), 0.5);
@@ -137,7 +137,7 @@ mod tests {
 
     /// Verifies SiLU (x·σ(x)) at zero, positive, and negative inputs.
     ///
-    /// This catches errors in the SiLU composition with sigmoid.
+    /// This catches errors in the SiLU composition with sigmoid_host.
     #[test]
     fn silu_matches_reference_values() {
         approx_eq(silu_scalar(0.0), 0.0);
@@ -147,7 +147,7 @@ mod tests {
 
     /// Verifies ReLU² clamps negatives to zero and squares positive values.
     ///
-    /// This catches sign errors or missing squaring in the relu2 formula.
+    /// This catches sign errors or missing squaring in the relu2_host formula.
     #[test]
     fn relu2_matches_reference_values() {
         approx_eq(relu2_scalar(-3.0), 0.0);
@@ -160,8 +160,8 @@ mod tests {
     /// This catches length miscalculation in the allocating wrappers.
     #[test]
     fn vector_api_allocates_output() {
-        assert_eq!(sigmoid(&[0.0, 1.0]).len(), 2);
-        assert_eq!(relu2(&[-1.0, 2.0]), vec![0.0, 4.0]);
+        assert_eq!(sigmoid_host(&[0.0, 1.0]).len(), 2);
+        assert_eq!(relu2_host(&[-1.0, 2.0]), vec![0.0, 4.0]);
     }
 
     /// Verifies that the in-place API mutates the buffer with correct SiLU values.
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn in_place_api_updates_buffer() {
         let mut values = [-1.0, 0.0, 2.0];
-        silu_in_place(&mut values);
+        silu_in_place_host(&mut values);
 
         approx_eq(values[0], -0.26894143);
         approx_eq(values[1], 0.0);

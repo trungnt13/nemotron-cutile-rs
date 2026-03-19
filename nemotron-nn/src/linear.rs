@@ -1,7 +1,7 @@
 use crate::LayerStub;
-use nemotron_kernels::gemm::{gemm_into, GemmError, GemmShape};
+use nemotron_kernels::gemm::{gemm_into_host, GemmError, GemmShape};
 use nemotron_kernels::quantize::{
-    dequantize_int4, packed_int4_len, validate_int4_params, Int4QuantizationParams, QuantizeError,
+    dequantize_int4_host, packed_int4_len, validate_int4_params, Int4QuantizationParams, QuantizeError,
 };
 use std::error::Error;
 use std::fmt;
@@ -123,7 +123,7 @@ impl Int4LinearWeights {
 
     pub fn materialize_dense(&self, shape: LinearShape) -> Result<DenseLinearWeights, LinearError> {
         self.validate(shape)?;
-        let values = dequantize_int4(&self.packed_values, shape.weight_len(), self.params)
+        let values = dequantize_int4_host(&self.packed_values, shape.weight_len(), self.params)
             .map_err(LinearError::Quantize)?;
         Ok(DenseLinearWeights { values })
     }
@@ -320,7 +320,7 @@ impl LinearProjection {
         };
 
         // Weights are stored row-major as [input_dim, output_dim].
-        gemm_into(
+        gemm_into_host(
             input,
             dense_weights,
             self.shape.gemm_shape(row_count),
@@ -392,7 +392,7 @@ impl fmt::Display for LinearError {
                 "linear weights {:?} are not supported on {:?} yet",
                 weight_kind, backend
             ),
-            Self::Gemm(error) => write!(f, "gemm failed: {error:?}"),
+            Self::Gemm(error) => write!(f, "gemm_host failed: {error:?}"),
             Self::Quantize(error) => write!(f, "quantization failed: {error:?}"),
         }
     }
@@ -403,7 +403,7 @@ impl Error for LinearError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nemotron_kernels::quantize::quantize_int4;
+    use nemotron_kernels::quantize::quantize_int4_host;
 
     fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
@@ -431,9 +431,9 @@ mod tests {
         );
     }
 
-    /// Verifies that dense-f32 projection computes gemm + bias correctly for multiple rows.
+    /// Verifies that dense-f32 projection computes gemm_host + bias correctly for multiple rows.
     ///
-    /// This catches incorrect weight layout, bias broadcasting, or gemm shape construction.
+    /// This catches incorrect weight layout, bias broadcasting, or gemm_host shape construction.
     #[test]
     fn projects_dense_weights_with_bias() {
         let layer = LinearProjection::new_dense_f32(
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn materializes_int4_weights_via_quantize_kernel() {
         let params = Int4QuantizationParams::new(0.5, 8);
-        let packed = quantize_int4(&[0.5, 1.0, -0.5, 0.0], params).unwrap();
+        let packed = quantize_int4_host(&[0.5, 1.0, -0.5, 0.0], params).unwrap();
         let layer = LinearProjection::new_int4_affine(2, 2, packed, params, None).unwrap();
 
         let dense = layer.materialize_dense_weights().unwrap();
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn rejects_projecting_unsupported_int4_weights() {
         let params = Int4QuantizationParams::new(0.5, 8);
-        let packed = quantize_int4(&[0.5, 1.0, -0.5, 0.0], params).unwrap();
+        let packed = quantize_int4_host(&[0.5, 1.0, -0.5, 0.0], params).unwrap();
         let layer = LinearProjection::new_int4_affine(2, 2, packed, params, None).unwrap();
 
         let error = layer.project(&[1.0, 2.0, 3.0, 4.0], 2).unwrap_err();

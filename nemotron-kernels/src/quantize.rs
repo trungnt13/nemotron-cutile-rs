@@ -42,13 +42,13 @@ pub const fn packed_int4_len(value_count: usize) -> usize {
     value_count.div_ceil(2)
 }
 
-pub fn pack_int4(values: &[u8]) -> Result<Vec<u8>, QuantizeError> {
+pub fn pack_int4_host(values: &[u8]) -> Result<Vec<u8>, QuantizeError> {
     let mut packed = vec![0; packed_int4_len(values.len())];
-    pack_int4_into(values, &mut packed)?;
+    pack_int4_into_host(values, &mut packed)?;
     Ok(packed)
 }
 
-pub fn pack_int4_into(values: &[u8], packed: &mut [u8]) -> Result<(), QuantizeError> {
+pub fn pack_int4_into_host(values: &[u8], packed: &mut [u8]) -> Result<(), QuantizeError> {
     if packed.len() != packed_int4_len(values.len()) {
         return Err(QuantizeError::LengthMismatch {
             argument: "packed",
@@ -72,13 +72,13 @@ pub fn pack_int4_into(values: &[u8], packed: &mut [u8]) -> Result<(), QuantizeEr
     Ok(())
 }
 
-pub fn unpack_int4(packed: &[u8], value_count: usize) -> Result<Vec<u8>, QuantizeError> {
+pub fn unpack_int4_host(packed: &[u8], value_count: usize) -> Result<Vec<u8>, QuantizeError> {
     let mut values = vec![0; value_count];
-    unpack_int4_into(packed, value_count, &mut values)?;
+    unpack_int4_into_host(packed, value_count, &mut values)?;
     Ok(values)
 }
 
-pub fn unpack_int4_into(
+pub fn unpack_int4_into_host(
     packed: &[u8],
     value_count: usize,
     output: &mut [u8],
@@ -111,16 +111,16 @@ pub fn unpack_int4_into(
     Ok(())
 }
 
-pub fn quantize_int4(
+pub fn quantize_int4_host(
     values: &[f32],
     params: Int4QuantizationParams,
 ) -> Result<Vec<u8>, QuantizeError> {
     let mut packed = vec![0; packed_int4_len(values.len())];
-    quantize_int4_into(values, params, &mut packed)?;
+    quantize_int4_into_host(values, params, &mut packed)?;
     Ok(packed)
 }
 
-pub fn quantize_int4_into(
+pub fn quantize_int4_into_host(
     values: &[f32],
     params: Int4QuantizationParams,
     packed: &mut [u8],
@@ -132,20 +132,20 @@ pub fn quantize_int4_into(
         quantized[index] = quantize_scalar(value, params, index)?;
     }
 
-    pack_int4_into(&quantized, packed)
+    pack_int4_into_host(&quantized, packed)
 }
 
-pub fn dequantize_int4(
+pub fn dequantize_int4_host(
     packed: &[u8],
     value_count: usize,
     params: Int4QuantizationParams,
 ) -> Result<Vec<f32>, QuantizeError> {
     let mut output = vec![0.0; value_count];
-    dequantize_int4_into(packed, value_count, params, &mut output)?;
+    dequantize_int4_into_host(packed, value_count, params, &mut output)?;
     Ok(output)
 }
 
-pub fn dequantize_int4_into(
+pub fn dequantize_int4_into_host(
     packed: &[u8],
     value_count: usize,
     params: Int4QuantizationParams,
@@ -161,7 +161,7 @@ pub fn dequantize_int4_into(
         });
     }
 
-    let unpacked = unpack_int4(packed, value_count)?;
+    let unpacked = unpack_int4_host(packed, value_count)?;
     for (code, slot) in unpacked.into_iter().zip(output.iter_mut()) {
         *slot = dequantize_scalar(code, params);
     }
@@ -252,10 +252,10 @@ mod tests {
     /// This catches nibble ordering errors (low vs high nibble placement).
     #[test]
     fn packs_and_unpacks_even_number_of_values() {
-        let packed = pack_int4(&[0x1, 0xA, 0x3, 0xF]).unwrap();
+        let packed = pack_int4_host(&[0x1, 0xA, 0x3, 0xF]).unwrap();
         assert_eq!(packed, vec![0xA1, 0xF3]);
 
-        let unpacked = unpack_int4(&packed, 4).unwrap();
+        let unpacked = unpack_int4_host(&packed, 4).unwrap();
         assert_eq!(unpacked, vec![0x1, 0xA, 0x3, 0xF]);
     }
 
@@ -264,10 +264,10 @@ mod tests {
     /// This catches errors in the ceil-division packed length or trailing nibble handling.
     #[test]
     fn packs_and_unpacks_odd_number_of_values() {
-        let packed = pack_int4(&[0x2, 0x4, 0x6]).unwrap();
+        let packed = pack_int4_host(&[0x2, 0x4, 0x6]).unwrap();
         assert_eq!(packed, vec![0x42, 0x06]);
 
-        let unpacked = unpack_int4(&packed, 3).unwrap();
+        let unpacked = unpack_int4_host(&packed, 3).unwrap();
         assert_eq!(unpacked, vec![0x2, 0x4, 0x6]);
     }
 
@@ -279,10 +279,10 @@ mod tests {
         let params = Int4QuantizationParams::new(0.5, 8);
         let input = [-1.0, -0.5, 0.0, 0.5, 1.0];
 
-        let packed = quantize_int4(&input, params).unwrap();
+        let packed = quantize_int4_host(&input, params).unwrap();
         assert_eq!(packed, vec![0x76, 0x98, 0x0A]);
 
-        let output = dequantize_int4(&packed, input.len(), params).unwrap();
+        let output = dequantize_int4_host(&packed, input.len(), params).unwrap();
         approx_eq_slice(&output, &input);
     }
 
@@ -292,10 +292,10 @@ mod tests {
     #[test]
     fn quantization_clamps_to_int4_range() {
         let params = Int4QuantizationParams::new(1.0, 8);
-        let packed = quantize_int4(&[-100.0, 100.0], params).unwrap();
+        let packed = quantize_int4_host(&[-100.0, 100.0], params).unwrap();
         assert_eq!(packed, vec![0xF0]);
 
-        let output = dequantize_int4(&packed, 2, params).unwrap();
+        let output = dequantize_int4_host(&packed, 2, params).unwrap();
         approx_eq(output[0], -8.0);
         approx_eq(output[1], 7.0);
     }
@@ -308,7 +308,7 @@ mod tests {
         let params = Int4QuantizationParams::new(0.25, 0);
         let mut packed = [0xFF; 2];
 
-        quantize_int4_into(&[0.0, 0.25, 0.5], params, &mut packed).unwrap();
+        quantize_int4_into_host(&[0.0, 0.25, 0.5], params, &mut packed).unwrap();
 
         assert_eq!(packed, [0x10, 0x02]);
     }
@@ -321,7 +321,7 @@ mod tests {
         let params = Int4QuantizationParams::new(0.25, 2);
         let mut output = [-1.0; 3];
 
-        dequantize_int4_into(&[0x31, 0x04], 3, params, &mut output).unwrap();
+        dequantize_int4_into_host(&[0x31, 0x04], 3, params, &mut output).unwrap();
 
         approx_eq_slice(&output, &[-0.25, 0.25, 0.5]);
     }
@@ -333,10 +333,10 @@ mod tests {
     fn handles_empty_inputs() {
         let params = Int4QuantizationParams::new(0.5, 8);
 
-        assert_eq!(pack_int4(&[]).unwrap(), Vec::<u8>::new());
-        assert_eq!(unpack_int4(&[], 0).unwrap(), Vec::<u8>::new());
-        assert_eq!(quantize_int4(&[], params).unwrap(), Vec::<u8>::new());
-        assert_eq!(dequantize_int4(&[], 0, params).unwrap(), Vec::<f32>::new());
+        assert_eq!(pack_int4_host(&[]).unwrap(), Vec::<u8>::new());
+        assert_eq!(unpack_int4_host(&[], 0).unwrap(), Vec::<u8>::new());
+        assert_eq!(quantize_int4_host(&[], params).unwrap(), Vec::<u8>::new());
+        assert_eq!(dequantize_int4_host(&[], 0, params).unwrap(), Vec::<f32>::new());
     }
 
     /// Verifies that a zero scale is rejected as invalid quantization params.
@@ -344,7 +344,7 @@ mod tests {
     /// This catches missing scale validation (zero scale causes division by zero).
     #[test]
     fn rejects_invalid_quantization_params() {
-        let error = quantize_int4(&[0.0], Int4QuantizationParams::new(0.0, 8)).unwrap_err();
+        let error = quantize_int4_host(&[0.0], Int4QuantizationParams::new(0.0, 8)).unwrap_err();
         assert_eq!(
             error,
             QuantizeError::InvalidParams(Int4QuantizationParams::new(0.0, 8))
@@ -356,7 +356,7 @@ mod tests {
     /// This catches missing range check in the pack path.
     #[test]
     fn rejects_out_of_range_int4_value() {
-        let error = pack_int4(&[16]).unwrap_err();
+        let error = pack_int4_host(&[16]).unwrap_err();
         assert_eq!(error, QuantizeError::Int4OutOfRange(16));
     }
 
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn rejects_packed_length_mismatch() {
         let mut packed = [0; 0];
-        let error = quantize_int4_into(
+        let error = quantize_int4_into_host(
             &[0.0, 1.0],
             Int4QuantizationParams::new(1.0, 8),
             &mut packed,
@@ -390,7 +390,7 @@ mod tests {
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 1];
         let error =
-            dequantize_int4_into(&[0x10], 2, Int4QuantizationParams::new(1.0, 0), &mut output)
+            dequantize_int4_into_host(&[0x10], 2, Int4QuantizationParams::new(1.0, 0), &mut output)
                 .unwrap_err();
 
         assert_eq!(
@@ -408,7 +408,7 @@ mod tests {
     /// This catches missing non-finite input validation.
     #[test]
     fn rejects_non_finite_input() {
-        let error = quantize_int4(&[f32::NAN], Int4QuantizationParams::new(1.0, 8)).unwrap_err();
+        let error = quantize_int4_host(&[f32::NAN], Int4QuantizationParams::new(1.0, 8)).unwrap_err();
 
         match error {
             QuantizeError::NonFiniteInput { index, value } => {

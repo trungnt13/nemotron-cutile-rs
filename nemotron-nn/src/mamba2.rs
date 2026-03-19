@@ -1,8 +1,8 @@
 use crate::{LayerStub, LinearError, LinearProjection};
-use nemotron_kernels::activations::silu_in_place;
-use nemotron_kernels::conv1d::{depthwise_causal_conv1d, Conv1dError, Conv1dShape};
-use nemotron_kernels::rms_norm::{gated_rms_norm, RmsNormError};
-use nemotron_kernels::ssm::{selective_scan, SelectiveScanParams, SelectiveScanShape, SsmError};
+use nemotron_kernels::activations::silu_in_place_host;
+use nemotron_kernels::conv1d::{depthwise_causal_conv1d_host, Conv1dError, Conv1dShape};
+use nemotron_kernels::rms_norm::{gated_rms_norm_host, RmsNormError};
+use nemotron_kernels::ssm::{selective_scan_host, SelectiveScanParams, SelectiveScanShape, SsmError};
 use std::error::Error;
 use std::fmt;
 
@@ -289,7 +289,7 @@ impl Mamba2Mixer {
                 values
             };
 
-            let conv_output = depthwise_causal_conv1d(
+            let conv_output = depthwise_causal_conv1d_host(
                 &conv_input,
                 &self.conv_weights,
                 Conv1dShape::new(
@@ -301,7 +301,7 @@ impl Mamba2Mixer {
             .map_err(Mamba2Error::Conv1d)?;
             let mut conv_activated =
                 conv_output[(conv_prefix_steps * self.conv_channels)..].to_vec();
-            silu_in_place(&mut conv_activated);
+            silu_in_place_host(&mut conv_activated);
 
             let batch_delta_t =
                 batch_matrix_slice(&delta_t, batch, shape.sequence_len, self.conv_channels);
@@ -323,7 +323,7 @@ impl Mamba2Mixer {
             let initial_state = cache.as_ref().map(|cache| {
                 batch_ssm_state_slice(cache, batch, self.conv_channels, self.state_size).to_vec()
             });
-            let scan_output = selective_scan(
+            let scan_output = selective_scan_host(
                 SelectiveScanParams {
                     input: &conv_activated,
                     delta_t: batch_delta_t,
@@ -557,7 +557,7 @@ fn gated_rms_norm_rows(
     for row_index in 0..row_count {
         let start = row_index * row_width;
         let end = start + row_width;
-        let normalized = gated_rms_norm(&input[start..end], weight, &gate[start..end], epsilon)?;
+        let normalized = gated_rms_norm_host(&input[start..end], weight, &gate[start..end], epsilon)?;
         output[start..end].copy_from_slice(&normalized);
     }
 
@@ -659,8 +659,8 @@ impl Error for Mamba2Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nemotron_kernels::activations::silu;
-    use nemotron_kernels::ssm::{selective_scan, SelectiveScanParams, SelectiveScanShape};
+    use nemotron_kernels::activations::silu_host;
+    use nemotron_kernels::ssm::{selective_scan_host, SelectiveScanParams, SelectiveScanShape};
 
     fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
@@ -722,15 +722,15 @@ mod tests {
         let shape = Mamba2ForwardShape::new(1, 2);
 
         let projected = mixer.input_projection.project(&hidden_states, 2).unwrap();
-        let conv = silu(
-            &depthwise_causal_conv1d(&projected, &mixer.conv_weights, Conv1dShape::new(2, 1, 1))
+        let conv = silu_host(
+            &depthwise_causal_conv1d_host(&projected, &mixer.conv_weights, Conv1dShape::new(2, 1, 1))
                 .unwrap(),
         );
         let dt = mixer.delta_t_projection.project(&hidden_states, 2).unwrap();
         let b = mixer.b_projection.project(&hidden_states, 2).unwrap();
         let c = mixer.c_projection.project(&hidden_states, 2).unwrap();
         let gate = mixer.gate_projection.project(&hidden_states, 2).unwrap();
-        let scan = selective_scan(
+        let scan = selective_scan_host(
             SelectiveScanParams {
                 input: &conv,
                 delta_t: &dt,

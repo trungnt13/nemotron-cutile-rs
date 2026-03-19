@@ -1,6 +1,6 @@
 use crate::linear::{LinearError, LinearProjection, LinearShape, LinearWeightKind, DENSE_F32_HOST};
 use crate::LayerStub;
-use nemotron_kernels::activations::{relu2_in_place, ActivationKernel, RELU2};
+use nemotron_kernels::activations::{relu2_in_place_host, ActivationKernel, RELU2};
 use std::error::Error;
 use std::fmt;
 
@@ -201,7 +201,7 @@ impl MlpLayer {
             .up_projection
             .project(input, row_count)
             .map_err(MlpError::UpProjection)?;
-        relu2_in_place(&mut activated);
+        relu2_in_place_host(&mut activated);
         self.down_projection
             .project_into(&activated, row_count, output)
             .map_err(MlpError::DownProjection)?;
@@ -293,7 +293,7 @@ impl Error for MlpError {}
 mod tests {
     use super::*;
     use crate::linear::LinearProjection;
-    use nemotron_kernels::quantize::{quantize_int4, Int4QuantizationParams};
+    use nemotron_kernels::quantize::{quantize_int4_host, Int4QuantizationParams};
 
     fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_non_dense_projection() {
         let params = Int4QuantizationParams::new(0.5, 8);
-        let packed = quantize_int4(&[1.0, 0.0, 0.0, 1.0], params).unwrap();
+        let packed = quantize_int4_host(&[1.0, 0.0, 0.0, 1.0], params).unwrap();
         let up = LinearProjection::new_int4_affine(2, 2, packed, params, None).unwrap();
         let down = LinearProjection::new_dense_f32(2, 2, vec![1.0, 0.0, 0.0, 1.0], None).unwrap();
         let layer = MlpLayer::new(MlpShape::new(2, 2), up, down).unwrap();

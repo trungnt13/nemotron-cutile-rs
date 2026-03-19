@@ -41,7 +41,7 @@ impl EmbeddingShape {
 }
 
 pub const EMBEDDING_LOOKUP: EmbeddingKernel = EmbeddingKernel {
-    name: "embedding_lookup",
+    name: "embedding_lookup_host",
     backend: EmbeddingBackend::HostFallback,
 };
 
@@ -49,17 +49,17 @@ pub fn supported_embedding_kernels() -> [EmbeddingKernel; 1] {
     [EMBEDDING_LOOKUP]
 }
 
-pub fn embedding_lookup(
+pub fn embedding_lookup_host(
     table: &[f32],
     token_ids: &[usize],
     shape: EmbeddingShape,
 ) -> Result<Vec<f32>, EmbeddingError> {
     let mut output = vec![0.0; shape.output_len(token_ids.len())];
-    embedding_lookup_into(table, token_ids, shape, &mut output)?;
+    embedding_lookup_into_host(table, token_ids, shape, &mut output)?;
     Ok(output)
 }
 
-pub fn embedding_lookup_into(
+pub fn embedding_lookup_into_host(
     table: &[f32],
     token_ids: &[usize],
     shape: EmbeddingShape,
@@ -79,17 +79,17 @@ pub fn embedding_lookup_into(
     Ok(())
 }
 
-pub fn embedding_lookup_token(
+pub fn embedding_lookup_token_host(
     table: &[f32],
     token_id: usize,
     shape: EmbeddingShape,
 ) -> Result<Vec<f32>, EmbeddingError> {
     let mut output = vec![0.0; shape.hidden_size];
-    embedding_lookup_token_into(table, token_id, shape, &mut output)?;
+    embedding_lookup_token_into_host(table, token_id, shape, &mut output)?;
     Ok(output)
 }
 
-pub fn embedding_lookup_token_into(
+pub fn embedding_lookup_token_into_host(
     table: &[f32],
     token_id: usize,
     shape: EmbeddingShape,
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(
             supported_embedding_kernels(),
             [EmbeddingKernel {
-                name: "embedding_lookup",
+                name: "embedding_lookup_host",
                 backend: EmbeddingBackend::HostFallback,
             }]
         );
@@ -208,7 +208,7 @@ mod tests {
     /// This catches off-by-one errors in the row offset calculation.
     #[test]
     fn looks_up_single_token() {
-        let output = embedding_lookup_token(&sample_table(), 2, EmbeddingShape::new(4, 3)).unwrap();
+        let output = embedding_lookup_token_host(&sample_table(), 2, EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![2.0, 2.1, 2.2]);
     }
 
@@ -217,7 +217,7 @@ mod tests {
     /// This catches indexing errors when writing multiple rows to the output.
     #[test]
     fn looks_up_multiple_tokens() {
-        let output = embedding_lookup(&sample_table(), &[3, 1], EmbeddingShape::new(4, 3)).unwrap();
+        let output = embedding_lookup_host(&sample_table(), &[3, 1], EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![3.0, 3.1, 3.2, 1.0, 1.1, 1.2]);
     }
 
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn repeated_tokens_repeat_rows() {
         let output =
-            embedding_lookup(&sample_table(), &[2, 2, 0], EmbeddingShape::new(4, 3)).unwrap();
+            embedding_lookup_host(&sample_table(), &[2, 2, 0], EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![2.0, 2.1, 2.2, 2.0, 2.1, 2.2, 0.0, 0.1, 0.2]);
     }
 
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn lookup_into_writes_existing_buffer() {
         let mut output = [-1.0; 6];
-        embedding_lookup_into(
+        embedding_lookup_into_host(
             &sample_table(),
             &[1, 0],
             EmbeddingShape::new(4, 3),
@@ -252,7 +252,7 @@ mod tests {
     /// This catches panics on zero-length inputs.
     #[test]
     fn empty_token_ids_produce_empty_output() {
-        let output = embedding_lookup(&sample_table(), &[], EmbeddingShape::new(4, 3)).unwrap();
+        let output = embedding_lookup_host(&sample_table(), &[], EmbeddingShape::new(4, 3)).unwrap();
         assert!(output.is_empty());
     }
 
@@ -261,7 +261,7 @@ mod tests {
     /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
-        let error = embedding_lookup(&sample_table(), &[0], EmbeddingShape::new(0, 3)).unwrap_err();
+        let error = embedding_lookup_host(&sample_table(), &[0], EmbeddingShape::new(0, 3)).unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::InvalidShape(EmbeddingShape::new(0, 3))
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn rejects_table_length_mismatch() {
         let error =
-            embedding_lookup(&sample_table()[..11], &[0], EmbeddingShape::new(4, 3)).unwrap_err();
+            embedding_lookup_host(&sample_table()[..11], &[0], EmbeddingShape::new(4, 3)).unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::LengthMismatch {
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 5];
-        let error = embedding_lookup_into(
+        let error = embedding_lookup_into_host(
             &sample_table(),
             &[0, 1],
             EmbeddingShape::new(4, 3),
@@ -313,7 +313,7 @@ mod tests {
     /// This catches off-by-one in the token ID bounds check.
     #[test]
     fn rejects_out_of_range_token() {
-        let error = embedding_lookup(&sample_table(), &[4], EmbeddingShape::new(4, 3)).unwrap_err();
+        let error = embedding_lookup_host(&sample_table(), &[4], EmbeddingShape::new(4, 3)).unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::TokenOutOfRange {
@@ -330,7 +330,7 @@ mod tests {
     fn rejects_single_token_output_length_mismatch() {
         let mut output = [0.0; 2];
         let error =
-            embedding_lookup_token_into(&sample_table(), 1, EmbeddingShape::new(4, 3), &mut output)
+            embedding_lookup_token_into_host(&sample_table(), 1, EmbeddingShape::new(4, 3), &mut output)
                 .unwrap_err();
         assert_eq!(
             error,

@@ -110,7 +110,7 @@ pub fn supported_attention_kernels() -> [AttentionKernel; 1] {
     [GROUPED_QUERY_ATTENTION]
 }
 
-pub fn attention_scores(
+pub fn attention_scores_host(
     query: &[f32],
     key: &[f32],
     shape: AttentionShape,
@@ -170,7 +170,7 @@ pub fn attention_scores(
     Ok(scores)
 }
 
-pub fn scaled_dot_product_attention(
+pub fn scaled_dot_product_attention_host(
     query: &[f32],
     key: &[f32],
     value: &[f32],
@@ -178,11 +178,11 @@ pub fn scaled_dot_product_attention(
     options: AttentionOptions,
 ) -> Result<Vec<f32>, AttentionError> {
     let mut output = vec![0.0; shape.output_len()];
-    scaled_dot_product_attention_into(query, key, value, shape, options, &mut output)?;
+    scaled_dot_product_attention_into_host(query, key, value, shape, options, &mut output)?;
     Ok(output)
 }
 
-pub fn scaled_dot_product_attention_into(
+pub fn scaled_dot_product_attention_into_host(
     query: &[f32],
     key: &[f32],
     value: &[f32],
@@ -200,7 +200,7 @@ pub fn scaled_dot_product_attention_into(
         });
     }
 
-    let scores = attention_scores(query, key, shape, options)?;
+    let scores = attention_scores_host(query, key, shape, options)?;
     let kv_group_size = shape.query_head_count / shape.key_value_head_count;
     let mut weights = vec![0.0_f32; shape.key_value_sequence_len];
 
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn computes_attention_scores_for_single_head() {
         let shape = AttentionShape::new(1, 1, 2, 1, 1, 2);
-        let scores = attention_scores(
+        let scores = attention_scores_host(
             &[1.0, 0.0],
             &[1.0, 0.0, 0.0, 1.0],
             shape,
@@ -433,13 +433,13 @@ mod tests {
         approx_eq_slice(&scores, &[1.0, 0.0]);
     }
 
-    /// Verifies full scaled dot-product attention (scores → softmax → V weighted sum).
+    /// Verifies full scaled dot-product attention (scores → softmax_host → V weighted sum).
     ///
-    /// This catches errors in softmax normalization or value accumulation.
+    /// This catches errors in softmax_host normalization or value accumulation.
     #[test]
     fn attends_over_single_head_without_masking() {
         let shape = AttentionShape::new(1, 1, 2, 1, 1, 2);
-        let output = scaled_dot_product_attention(
+        let output = scaled_dot_product_attention_host(
             &[1.0, 0.0],
             &[1.0, 0.0, 0.0, 1.0],
             &[10.0, 1.0, 1.0, 20.0],
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn applies_causal_mask() {
         let shape = AttentionShape::new(1, 2, 2, 1, 1, 2);
-        let output = scaled_dot_product_attention(
+        let output = scaled_dot_product_attention_host(
             &[1.0, 0.0, 0.0, 1.0],
             &[1.0, 0.0, 0.0, 1.0],
             &[10.0, 0.0, 0.0, 5.0],
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn grouped_query_attention_reuses_key_value_heads() {
         let shape = AttentionShape::new(1, 1, 2, 2, 1, 1);
-        let output = scaled_dot_product_attention(
+        let output = scaled_dot_product_attention_host(
             &[1.0, 2.0],
             &[1.0, 0.0],
             &[10.0, 1.0],
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn query_position_offset_supports_decode_style_causal_attention() {
         let shape = AttentionShape::new(1, 1, 3, 1, 1, 1);
-        let output = scaled_dot_product_attention(
+        let output = scaled_dot_product_attention_host(
             &[1.0],
             &[1.0, 1.0, 1.0],
             &[10.0, 20.0, 30.0],
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn rejects_invalid_head_grouping() {
         let shape = AttentionShape::new(1, 1, 1, 3, 2, 1);
-        let error = attention_scores(
+        let error = attention_scores_host(
             &[1.0, 2.0, 3.0],
             &[1.0, 2.0],
             shape,
@@ -549,7 +549,7 @@ mod tests {
     fn rejects_output_length_mismatch() {
         let shape = AttentionShape::new(1, 1, 1, 1, 1, 1);
         let mut output = [0.0; 0];
-        let error = scaled_dot_product_attention_into(
+        let error = scaled_dot_product_attention_into_host(
             &[1.0],
             &[1.0],
             &[1.0],
@@ -569,13 +569,13 @@ mod tests {
         );
     }
 
-    /// Verifies that a zero softmax scale is rejected as invalid.
+    /// Verifies that a zero softmax_host scale is rejected as invalid.
     ///
     /// This catches missing scale validation (zero or negative scales produce wrong results).
     #[test]
     fn rejects_invalid_scale() {
         let shape = AttentionShape::new(1, 1, 1, 1, 1, 1);
-        let error = attention_scores(
+        let error = attention_scores_host(
             &[1.0],
             &[1.0],
             shape,

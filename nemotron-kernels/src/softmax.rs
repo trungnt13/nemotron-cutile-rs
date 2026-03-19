@@ -1,8 +1,8 @@
 use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
-    name: "softmax",
-    summary: "Numerically stable softmax kernels.",
+    name: "softmax_host",
+    summary: "Numerically stable softmax_host kernels.",
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,7 +18,7 @@ pub struct SoftmaxKernel {
 }
 
 pub const SOFTMAX: SoftmaxKernel = SoftmaxKernel {
-    name: "softmax",
+    name: "softmax_host",
     backend: SoftmaxBackend::HostFallback,
 };
 
@@ -26,19 +26,19 @@ pub fn supported_softmax_kernels() -> [SoftmaxKernel; 1] {
     [SOFTMAX]
 }
 
-pub fn softmax(values: &[f32]) -> Vec<f32> {
+pub fn softmax_host(values: &[f32]) -> Vec<f32> {
     let mut output = vec![0.0; values.len()];
-    softmax_into(values, &mut output)
-        .expect("softmax output buffer is allocated from input length and cannot mismatch");
+    softmax_into_host(values, &mut output)
+        .expect("softmax_host output buffer is allocated from input length and cannot mismatch");
     output
 }
 
-pub fn softmax_in_place(values: &mut [f32]) {
-    let output = softmax(values);
+pub fn softmax_in_place_host(values: &mut [f32]) {
+    let output = softmax_host(values);
     values.copy_from_slice(&output);
 }
 
-pub fn softmax_into(input: &[f32], output: &mut [f32]) -> Result<(), SoftmaxError> {
+pub fn softmax_into_host(input: &[f32], output: &mut [f32]) -> Result<(), SoftmaxError> {
     if input.len() != output.len() {
         return Err(SoftmaxError::LengthMismatch {
             input: input.len(),
@@ -89,7 +89,7 @@ mod tests {
         );
     }
 
-    /// Verifies that the softmax kernel reports HostFallback as its backend.
+    /// Verifies that the softmax_host kernel reports HostFallback as its backend.
     ///
     /// This catches accidental backend tag changes before GPU kernels exist.
     #[test]
@@ -97,18 +97,18 @@ mod tests {
         assert_eq!(
             supported_softmax_kernels(),
             [SoftmaxKernel {
-                name: "softmax",
+                name: "softmax_host",
                 backend: SoftmaxBackend::HostFallback,
             }]
         );
     }
 
-    /// Verifies softmax output against known reference values for [1, 2, 3].
+    /// Verifies softmax_host output against known reference values for [1, 2, 3].
     ///
     /// This catches errors in the exp/normalize formula.
     #[test]
     fn softmax_matches_reference_values() {
-        let output = softmax(&[1.0, 2.0, 3.0]);
+        let output = softmax_host(&[1.0, 2.0, 3.0]);
 
         approx_eq(output[0], 0.09003057);
         approx_eq(output[1], 0.24472848);
@@ -117,22 +117,22 @@ mod tests {
 
     /// Verifies that large inputs produce the same result as shifted inputs (numerical stability).
     ///
-    /// This catches missing max-subtraction in the softmax, which would cause overflow.
+    /// This catches missing max-subtraction in the softmax_host, which would cause overflow.
     #[test]
     fn softmax_is_stable_for_large_inputs() {
-        let output = softmax(&[1000.0, 1001.0, 1002.0]);
+        let output = softmax_host(&[1000.0, 1001.0, 1002.0]);
 
         approx_eq(output[0], 0.09003057);
         approx_eq(output[1], 0.24472848);
         approx_eq(output[2], 0.66524094);
     }
 
-    /// Verifies that softmax outputs sum to 1.0 across a wide value range.
+    /// Verifies that softmax_host outputs sum to 1.0 across a wide value range.
     ///
     /// This catches partition normalization errors.
     #[test]
     fn softmax_outputs_sum_to_one() {
-        let output = softmax(&[-10.0, 0.0, 10.0, 20.0]);
+        let output = softmax_host(&[-10.0, 0.0, 10.0, 20.0]);
         let sum: f32 = output.iter().sum();
 
         approx_eq(sum, 1.0);
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn softmax_in_place_updates_buffer() {
         let mut values = [0.0, 0.0, 0.0];
-        softmax_in_place(&mut values);
+        softmax_in_place_host(&mut values);
 
         approx_eq(values[0], 1.0 / 3.0);
         approx_eq(values[1], 1.0 / 3.0);
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn softmax_into_rejects_length_mismatch() {
         let mut output = [0.0; 1];
-        let error = softmax_into(&[1.0, 2.0], &mut output).unwrap_err();
+        let error = softmax_into_host(&[1.0, 2.0], &mut output).unwrap_err();
 
         assert_eq!(
             error,
@@ -173,6 +173,6 @@ mod tests {
     /// This catches panics on zero-length slices.
     #[test]
     fn softmax_handles_empty_input() {
-        assert_eq!(softmax(&[]), Vec::<f32>::new());
+        assert_eq!(softmax_host(&[]), Vec::<f32>::new());
     }
 }

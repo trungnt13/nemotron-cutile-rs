@@ -1,12 +1,12 @@
 use crate::linear::{LinearError, LinearProjection, LinearShape, DENSE_F32_HOST};
 use crate::{LayerStub, MlpError, MlpLayer, MlpShape};
-use nemotron_kernels::moe_routing::{moe_route, MoeRoutingError, MoeRoutingShape};
+use nemotron_kernels::moe_routing::{moe_route_host, MoeRoutingError, MoeRoutingShape};
 use std::error::Error;
 use std::fmt;
 
 pub const SPEC: LayerStub = LayerStub {
     name: "moe",
-    summary: "Host-fallback Mixture-of-Experts layer with sigmoid top-k routing.",
+    summary: "Host-fallback Mixture-of-Experts layer with sigmoid_host top-k routing.",
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,7 +185,7 @@ impl MoeLayer {
             .router
             .project(input, row_count)
             .map_err(MoeError::Router)?;
-        let routes = moe_route(
+        let routes = moe_route_host(
             &router_scores,
             MoeRoutingShape::new(row_count, self.shape.expert_count, self.shape.top_k),
         )
@@ -392,7 +392,7 @@ mod tests {
         MlpLayer::new_dense_relu2(1, 1, vec![1.0], None, vec![scale], None).unwrap()
     }
 
-    /// Verifies the full MoE path: router → sigmoid top-k → expert execution → weighted combination + shared expert.
+    /// Verifies the full MoE path: router → sigmoid_host top-k → expert execution → weighted combination + shared expert.
     ///
     /// This catches incorrect routing weight application, expert selection, or shared-expert addition.
     #[test]

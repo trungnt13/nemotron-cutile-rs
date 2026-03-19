@@ -3,7 +3,7 @@ use crate::{
     Mamba2ForwardShape, Mamba2Mixer, MlpError, MlpLayer, MoeError, MoeLayer,
 };
 use nemotron_kernels::attention::AttentionOptions;
-use nemotron_kernels::rms_norm::{rms_norm, RmsNormError};
+use nemotron_kernels::rms_norm::{rms_norm_host, RmsNormError};
 use std::error::Error;
 use std::fmt;
 
@@ -217,7 +217,7 @@ fn rms_norm_rows(input: &[f32], weight: &[f32], epsilon: f32) -> Result<Vec<f32>
     for row_index in 0..row_count {
         let start = row_index * row_width;
         let end = start + row_width;
-        let normalized = rms_norm(&input[start..end], weight, epsilon)?;
+        let normalized = rms_norm_host(&input[start..end], weight, epsilon)?;
         output[start..end].copy_from_slice(&normalized);
     }
 

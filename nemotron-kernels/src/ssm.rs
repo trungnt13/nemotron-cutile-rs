@@ -86,7 +86,7 @@ pub struct SelectiveScanOutput {
 }
 
 pub const SELECTIVE_SCAN: SsmKernel = SsmKernel {
-    name: "selective_scan",
+    name: "selective_scan_host",
     backend: SsmBackend::HostFallback,
 };
 
@@ -94,20 +94,20 @@ pub fn supported_ssm_kernels() -> [SsmKernel; 1] {
     [SELECTIVE_SCAN]
 }
 
-pub fn selective_scan(
+pub fn selective_scan_host(
     params: SelectiveScanParams<'_>,
     shape: SelectiveScanShape,
 ) -> Result<SelectiveScanOutput, SsmError> {
     let mut values = vec![0.0; shape.output_len()];
     let mut final_state = vec![0.0; shape.initial_state_len()];
-    selective_scan_into(params, shape, &mut values, &mut final_state)?;
+    selective_scan_into_host(params, shape, &mut values, &mut final_state)?;
     Ok(SelectiveScanOutput {
         values,
         final_state,
     })
 }
 
-pub fn selective_scan_into(
+pub fn selective_scan_into_host(
     params: SelectiveScanParams<'_>,
     shape: SelectiveScanShape,
     output: &mut [f32],
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(
             supported_ssm_kernels(),
             [SsmKernel {
-                name: "selective_scan",
+                name: "selective_scan_host",
                 backend: SsmBackend::HostFallback,
             }]
         );
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn selective_scan_updates_state_and_output() {
         let shape = SelectiveScanShape::new(2, 1, 2);
-        let output = selective_scan(
+        let output = selective_scan_host(
             SelectiveScanParams {
                 input: &[1.0, 2.0],
                 delta_t: &[1.0, 1.0],
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn selective_scan_uses_initial_state() {
         let shape = SelectiveScanShape::new(1, 1, 1);
-        let output = selective_scan(
+        let output = selective_scan_host(
             SelectiveScanParams {
                 input: &[2.0],
                 delta_t: &[1.0],
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn selective_scan_applies_softplus_to_delta_t() {
         let shape = SelectiveScanShape::new(1, 1, 1);
-        let output = selective_scan(
+        let output = selective_scan_host(
             SelectiveScanParams {
                 input: &[2.0],
                 delta_t: &[-1.0],
@@ -380,7 +380,7 @@ mod tests {
         let mut output = [-1.0; 2];
         let mut final_state = [-1.0; 1];
 
-        selective_scan_into(params, shape, &mut output, &mut final_state).unwrap();
+        selective_scan_into_host(params, shape, &mut output, &mut final_state).unwrap();
 
         approx_eq_slice(&output, &[1.0, 2.0]);
         approx_eq_slice(&final_state, &[2.0]);
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn rejects_invalid_shape() {
         let shape = SelectiveScanShape::new(0, 1, 1);
-        let error = selective_scan(
+        let error = selective_scan_host(
             SelectiveScanParams {
                 input: &[],
                 delta_t: &[],
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn rejects_length_mismatch() {
         let shape = SelectiveScanShape::new(1, 1, 1);
-        let error = selective_scan(
+        let error = selective_scan_host(
             SelectiveScanParams {
                 input: &[1.0],
                 delta_t: &[1.0],
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn rejects_negative_delta_t_without_softplus() {
         let shape = SelectiveScanShape::new(1, 1, 1);
-        let error = selective_scan(
+        let error = selective_scan_host(
             SelectiveScanParams {
                 input: &[1.0],
                 delta_t: &[-0.5],

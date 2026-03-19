@@ -1,6 +1,6 @@
 use crate::{LayerStub, LinearError, LinearProjection};
 use nemotron_kernels::attention::{
-    scaled_dot_product_attention, AttentionError, AttentionOptions, AttentionShape,
+    scaled_dot_product_attention_host, AttentionError, AttentionOptions, AttentionShape,
     GROUPED_QUERY_ATTENTION,
 };
 use std::error::Error;
@@ -197,7 +197,7 @@ impl AttentionLayer {
             self.head_dim,
         );
         let attention_output =
-            scaled_dot_product_attention(&query, &key, &value, attention_shape, options)
+            scaled_dot_product_attention_host(&query, &key, &value, attention_shape, options)
                 .map_err(AttentionLayerError::Attention)?;
 
         self.output_projection
@@ -366,7 +366,7 @@ impl Error for AttentionLayerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nemotron_kernels::attention::scaled_dot_product_attention;
+    use nemotron_kernels::attention::scaled_dot_product_attention_host;
 
     fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
@@ -409,7 +409,7 @@ mod tests {
             ..AttentionOptions::default()
         };
 
-        let expected = scaled_dot_product_attention(
+        let expected = scaled_dot_product_attention_host(
             &hidden_states,
             &hidden_states,
             &hidden_states,
@@ -448,7 +448,7 @@ mod tests {
             ..AttentionOptions::default()
         };
 
-        let expected = scaled_dot_product_attention(
+        let expected = scaled_dot_product_attention_host(
             &hidden_states,
             &hidden_states,
             &hidden_states,

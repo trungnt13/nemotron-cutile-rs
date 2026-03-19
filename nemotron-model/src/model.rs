@@ -1,7 +1,7 @@
 use crate::config::{ModelConfig, SpecialTokenIds};
 use crate::tokenizer::{ModelTokenizer, TokenizerError};
-use nemotron_kernels::embedding::{embedding_lookup, EmbeddingError, EmbeddingShape};
-use nemotron_kernels::rms_norm::{rms_norm, RmsNormError};
+use nemotron_kernels::embedding::{embedding_lookup_host, EmbeddingError, EmbeddingShape};
+use nemotron_kernels::rms_norm::{rms_norm_host, RmsNormError};
 use nemotron_nn::{BlockError, HybridCache, LinearError, LinearProjection, NemotronBlock};
 use std::error::Error;
 use std::fmt;
@@ -268,7 +268,7 @@ impl NemotronModel {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut hidden_states = embedding_lookup(
+        let mut hidden_states = embedding_lookup_host(
             runtime.embeddings.values(),
             &token_ids,
             runtime.embeddings.shape(),
@@ -356,7 +356,7 @@ fn rms_norm_rows(
     for row_index in 0..(input.len() / row_width) {
         let start = row_index * row_width;
         let end = start + row_width;
-        let normalized = rms_norm(&input[start..end], weight, epsilon)?;
+        let normalized = rms_norm_host(&input[start..end], weight, epsilon)?;
         output[start..end].copy_from_slice(&normalized);
     }
     Ok(output)
@@ -395,7 +395,7 @@ mod tests {
     /// Verifies that a zero-block runtime (embedding → norm → identity LM head) produces
     /// expected hidden states, logits, and argmax prediction for a two-token input.
     ///
-    /// This catches regressions in the embedding lookup → rms_norm → linear projection
+    /// This catches regressions in the embedding lookup → rms_norm_host → linear projection
     /// pipeline and the argmax prediction path.
     #[test]
     fn forward_tokens_runs_tiny_runtime() {

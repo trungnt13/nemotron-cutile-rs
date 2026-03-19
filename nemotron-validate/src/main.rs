@@ -1,11 +1,11 @@
 mod e2e;
 
-use nemotron_kernels::activations::{relu2, silu};
-use nemotron_kernels::conv1d::{depthwise_causal_conv1d, Conv1dShape};
-use nemotron_kernels::gemm::{gemm, GemmShape};
-use nemotron_kernels::moe_routing::{moe_route_softmax, MoeRoutingShape};
-use nemotron_kernels::rms_norm::rms_norm;
-use nemotron_kernels::softmax::softmax;
+use nemotron_kernels::activations::{relu2_host, silu_host};
+use nemotron_kernels::conv1d::{depthwise_causal_conv1d_host, Conv1dShape};
+use nemotron_kernels::gemm::{gemm_host, GemmShape};
+use nemotron_kernels::moe_routing::{moe_route_softmax_host, MoeRoutingShape};
+use nemotron_kernels::rms_norm::rms_norm_host;
+use nemotron_kernels::softmax::softmax_host;
 use nemotron_model::workspace_summary;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -134,9 +134,9 @@ fn validate_gemm(fixture: &Value) -> Result<ValidationResult, String> {
     let a_rows = array_len(value_at(fixture, "a")?);
     let a_cols = array_len(&value_at(fixture, "a")?[0]);
     let b_cols = array_len(&value_at(fixture, "b")?[0]);
-    let actual = gemm(&a, &b, GemmShape::new(a_rows, a_cols, b_cols))
+    let actual = gemm_host(&a, &b, GemmShape::new(a_rows, a_cols, b_cols))
         .map_err(|error| format!("{error:?}"))?;
-    Ok(compare_f32("gemm", &actual, &expected, DEFAULT_TOLERANCE))
+    Ok(compare_f32("gemm_host", &actual, &expected, DEFAULT_TOLERANCE))
 }
 
 fn validate_rms_norm(fixture: &Value) -> Result<ValidationResult, String> {
@@ -150,9 +150,9 @@ fn validate_rms_norm(fixture: &Value) -> Result<ValidationResult, String> {
     let row_width = weight.len();
     let mut actual = Vec::with_capacity(x.len());
     for row in x.chunks_exact(row_width) {
-        actual.extend(rms_norm(row, &weight, epsilon).map_err(|error| format!("{error:?}"))?);
+        actual.extend(rms_norm_host(row, &weight, epsilon).map_err(|error| format!("{error:?}"))?);
     }
-    Ok(compare_f32("rms_norm", &actual, &expected, 5e-4))
+    Ok(compare_f32("rms_norm_host", &actual, &expected, 5e-4))
 }
 
 fn validate_softmax(fixture: &Value) -> Result<ValidationResult, String> {
@@ -161,23 +161,23 @@ fn validate_softmax(fixture: &Value) -> Result<ValidationResult, String> {
     let row_width = last_dim_len(value_at(fixture, "x")?)?;
     let mut actual = Vec::with_capacity(x.len());
     for row in x.chunks_exact(row_width) {
-        actual.extend(softmax(row));
+        actual.extend(softmax_host(row));
     }
-    Ok(compare_f32("softmax", &actual, &expected, 5e-4))
+    Ok(compare_f32("softmax_host", &actual, &expected, 5e-4))
 }
 
 fn validate_silu(fixture: &Value) -> Result<ValidationResult, String> {
     let x = flatten_f32(value_at(fixture, "x")?);
     let expected = flatten_f32(value_at(fixture, "out")?);
-    Ok(compare_f32("silu", &silu(&x), &expected, DEFAULT_TOLERANCE))
+    Ok(compare_f32("silu_host", &silu_host(&x), &expected, DEFAULT_TOLERANCE))
 }
 
 fn validate_relu2(fixture: &Value) -> Result<ValidationResult, String> {
     let x = flatten_f32(value_at(fixture, "x")?);
     let expected = flatten_f32(value_at(fixture, "out")?);
     Ok(compare_f32(
-        "relu2",
-        &relu2(&x),
+        "relu2_host",
+        &relu2_host(&x),
         &expected,
         DEFAULT_TOLERANCE,
     ))
@@ -202,7 +202,7 @@ fn validate_conv1d(fixture: &Value) -> Result<ValidationResult, String> {
     for batch_index in 0..batch {
         let start = batch_index * batch_stride;
         let end = start + batch_stride;
-        let mut batch_output = depthwise_causal_conv1d(
+        let mut batch_output = depthwise_causal_conv1d_host(
             &input[start..end],
             &flattened_weights,
             Conv1dShape::new(sequence_len, channels, kernel_size),
@@ -229,7 +229,7 @@ fn validate_moe_routing(fixture: &Value) -> Result<ValidationResult, String> {
         .get("top_k")
         .and_then(Value::as_u64)
         .ok_or("missing top_k")? as usize;
-    let actual = moe_route_softmax(
+    let actual = moe_route_softmax_host(
         &logits,
         MoeRoutingShape::new(token_count, expert_count, top_k),
     )

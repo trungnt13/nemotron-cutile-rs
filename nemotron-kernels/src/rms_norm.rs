@@ -1,7 +1,7 @@
 use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
-    name: "rms_norm",
+    name: "rms_norm_host",
     summary: "RMSNorm and gated RMSNorm kernels.",
 };
 
@@ -18,12 +18,12 @@ pub struct RmsNormKernel {
 }
 
 pub const RMS_NORM: RmsNormKernel = RmsNormKernel {
-    name: "rms_norm",
+    name: "rms_norm_host",
     backend: RmsNormBackend::HostFallback,
 };
 
 pub const GATED_RMS_NORM: RmsNormKernel = RmsNormKernel {
-    name: "gated_rms_norm",
+    name: "gated_rms_norm_host",
     backend: RmsNormBackend::HostFallback,
 };
 
@@ -31,23 +31,23 @@ pub fn supported_rms_norm_kernels() -> [RmsNormKernel; 2] {
     [RMS_NORM, GATED_RMS_NORM]
 }
 
-pub fn rms_norm(input: &[f32], weight: &[f32], epsilon: f32) -> Result<Vec<f32>, RmsNormError> {
+pub fn rms_norm_host(input: &[f32], weight: &[f32], epsilon: f32) -> Result<Vec<f32>, RmsNormError> {
     let mut output = vec![0.0; input.len()];
-    rms_norm_into(input, weight, epsilon, &mut output)?;
+    rms_norm_into_host(input, weight, epsilon, &mut output)?;
     Ok(output)
 }
 
-pub fn rms_norm_in_place(
+pub fn rms_norm_in_place_host(
     values: &mut [f32],
     weight: &[f32],
     epsilon: f32,
 ) -> Result<(), RmsNormError> {
-    let output = rms_norm(values, weight, epsilon)?;
+    let output = rms_norm_host(values, weight, epsilon)?;
     values.copy_from_slice(&output);
     Ok(())
 }
 
-pub fn rms_norm_into(
+pub fn rms_norm_into_host(
     input: &[f32],
     weight: &[f32],
     epsilon: f32,
@@ -57,29 +57,29 @@ pub fn rms_norm_into(
     apply_rms_norm(input, weight, None, epsilon, output)
 }
 
-pub fn gated_rms_norm(
+pub fn gated_rms_norm_host(
     input: &[f32],
     weight: &[f32],
     gate: &[f32],
     epsilon: f32,
 ) -> Result<Vec<f32>, RmsNormError> {
     let mut output = vec![0.0; input.len()];
-    gated_rms_norm_into(input, weight, gate, epsilon, &mut output)?;
+    gated_rms_norm_into_host(input, weight, gate, epsilon, &mut output)?;
     Ok(output)
 }
 
-pub fn gated_rms_norm_in_place(
+pub fn gated_rms_norm_in_place_host(
     values: &mut [f32],
     weight: &[f32],
     gate: &[f32],
     epsilon: f32,
 ) -> Result<(), RmsNormError> {
-    let output = gated_rms_norm(values, weight, gate, epsilon)?;
+    let output = gated_rms_norm_host(values, weight, gate, epsilon)?;
     values.copy_from_slice(&output);
     Ok(())
 }
 
-pub fn gated_rms_norm_into(
+pub fn gated_rms_norm_into_host(
     input: &[f32],
     weight: &[f32],
     gate: &[f32],
@@ -90,7 +90,7 @@ pub fn gated_rms_norm_into(
     apply_rms_norm(input, weight, Some(gate), epsilon, output)
 }
 
-pub fn rms(input: &[f32], epsilon: f32) -> Result<f32, RmsNormError> {
+pub fn rms_host(input: &[f32], epsilon: f32) -> Result<f32, RmsNormError> {
     if input.is_empty() {
         return Err(RmsNormError::EmptyInput);
     }
@@ -114,7 +114,7 @@ fn apply_rms_norm(
     epsilon: f32,
     output: &mut [f32],
 ) -> Result<(), RmsNormError> {
-    let denom = rms(input, epsilon)?;
+    let denom = rms_host(input, epsilon)?;
     let scale = denom.recip();
 
     for index in 0..input.len() {
@@ -199,11 +199,11 @@ mod tests {
             supported_rms_norm_kernels(),
             [
                 RmsNormKernel {
-                    name: "rms_norm",
+                    name: "rms_norm_host",
                     backend: RmsNormBackend::HostFallback,
                 },
                 RmsNormKernel {
-                    name: "gated_rms_norm",
+                    name: "gated_rms_norm_host",
                     backend: RmsNormBackend::HostFallback,
                 },
             ]
@@ -215,7 +215,7 @@ mod tests {
     /// This catches errors in the RMS denominator or normalization formula.
     #[test]
     fn rms_norm_matches_reference_values() {
-        let output = rms_norm(&[1.0, 2.0], &[1.0, 1.0], 1e-5).unwrap();
+        let output = rms_norm_host(&[1.0, 2.0], &[1.0, 1.0], 1e-5).unwrap();
 
         approx_eq(output[0], 0.6324543);
         approx_eq(output[1], 1.2649086);
@@ -226,7 +226,7 @@ mod tests {
     /// This catches missing or swapped weight multiplication.
     #[test]
     fn rms_norm_applies_weights() {
-        let output = rms_norm(&[1.0, 2.0], &[2.0, 0.5], 1e-5).unwrap();
+        let output = rms_norm_host(&[1.0, 2.0], &[2.0, 0.5], 1e-5).unwrap();
 
         approx_eq(output[0], 1.2649086);
         approx_eq(output[1], 0.6324543);
@@ -237,7 +237,7 @@ mod tests {
     /// This catches missing gate multiplication or wrong application order.
     #[test]
     fn gated_rms_norm_multiplies_gate_after_normalization() {
-        let output = gated_rms_norm(&[1.0, 2.0], &[1.0, 1.0], &[2.0, 0.5], 1e-5).unwrap();
+        let output = gated_rms_norm_host(&[1.0, 2.0], &[1.0, 1.0], &[2.0, 0.5], 1e-5).unwrap();
 
         approx_eq(output[0], 1.2649086);
         approx_eq(output[1], 0.6324543);
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn rms_norm_in_place_updates_buffer() {
         let mut values = [1.0, 2.0];
-        rms_norm_in_place(&mut values, &[1.0, 1.0], 1e-5).unwrap();
+        rms_norm_in_place_host(&mut values, &[1.0, 1.0], 1e-5).unwrap();
 
         approx_eq(values[0], 0.6324543);
         approx_eq(values[1], 1.2649086);
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn gated_rms_norm_in_place_updates_buffer() {
         let mut values = [1.0, 2.0];
-        gated_rms_norm_in_place(&mut values, &[1.0, 1.0], &[0.5, 2.0], 1e-5).unwrap();
+        gated_rms_norm_in_place_host(&mut values, &[1.0, 1.0], &[0.5, 2.0], 1e-5).unwrap();
 
         approx_eq(values[0], 0.31622714);
         approx_eq(values[1], 2.529817);
@@ -272,7 +272,7 @@ mod tests {
     /// This catches NaN or infinity from dividing zero by a near-zero RMS.
     #[test]
     fn zero_input_stays_zero() {
-        let output = rms_norm(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0], 1e-5).unwrap();
+        let output = rms_norm_host(&[0.0, 0.0, 0.0], &[1.0, 2.0, 3.0], 1e-5).unwrap();
         assert_eq!(output, vec![0.0, 0.0, 0.0]);
     }
 
@@ -281,7 +281,7 @@ mod tests {
     /// This catches missing weight length validation.
     #[test]
     fn rejects_length_mismatch() {
-        let error = rms_norm(&[1.0, 2.0], &[1.0], 1e-5).unwrap_err();
+        let error = rms_norm_host(&[1.0, 2.0], &[1.0], 1e-5).unwrap_err();
         assert_eq!(
             error,
             RmsNormError::LengthMismatch {
@@ -297,7 +297,7 @@ mod tests {
     /// This catches missing gate length validation.
     #[test]
     fn rejects_gate_length_mismatch() {
-        let error = gated_rms_norm(&[1.0, 2.0], &[1.0, 1.0], &[1.0], 1e-5).unwrap_err();
+        let error = gated_rms_norm_host(&[1.0, 2.0], &[1.0, 1.0], &[1.0], 1e-5).unwrap_err();
         assert_eq!(
             error,
             RmsNormError::LengthMismatch {
@@ -313,7 +313,7 @@ mod tests {
     /// This catches missing epsilon sign validation.
     #[test]
     fn rejects_negative_epsilon() {
-        let error = rms_norm(&[1.0, 2.0], &[1.0, 1.0], -1.0).unwrap_err();
+        let error = rms_norm_host(&[1.0, 2.0], &[1.0, 1.0], -1.0).unwrap_err();
         assert_eq!(error, RmsNormError::NegativeEpsilon(-1.0));
     }
 
@@ -322,7 +322,7 @@ mod tests {
     /// This catches division by zero in the mean-square computation.
     #[test]
     fn rejects_empty_input() {
-        let error = rms_norm(&[], &[], 1e-5).unwrap_err();
+        let error = rms_norm_host(&[], &[], 1e-5).unwrap_err();
         assert_eq!(error, RmsNormError::EmptyInput);
     }
 }

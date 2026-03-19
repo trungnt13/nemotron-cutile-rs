@@ -2,7 +2,7 @@ use crate::{activations::sigmoid_scalar, KernelStub};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "moe_routing",
-    summary: "Top-k expert routing kernels with sigmoid scoring.",
+    summary: "Top-k expert routing kernels with sigmoid_host scoring.",
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,14 +63,14 @@ pub fn supported_moe_routing_kernels() -> [MoeRoutingKernel; 1] {
     [MOE_SIGMOID_TOPK]
 }
 
-pub fn moe_route_token(scores: &[f32], top_k: usize) -> Result<MoeTokenRoute, MoeRoutingError> {
+pub fn moe_route_token_host(scores: &[f32], top_k: usize) -> Result<MoeTokenRoute, MoeRoutingError> {
     let mut indices = vec![0; top_k];
     let mut weights = vec![0.0; top_k];
-    moe_route_token_into(scores, top_k, &mut indices, &mut weights)?;
+    moe_route_token_into_host(scores, top_k, &mut indices, &mut weights)?;
     Ok(MoeTokenRoute { indices, weights })
 }
 
-pub fn moe_route_token_into(
+pub fn moe_route_token_into_host(
     scores: &[f32],
     top_k: usize,
     indices: &mut [usize],
@@ -83,27 +83,27 @@ pub fn moe_route_token_into(
     Ok(())
 }
 
-pub fn moe_route(
+pub fn moe_route_host(
     scores: &[f32],
     shape: MoeRoutingShape,
 ) -> Result<MoeRoutingOutput, MoeRoutingError> {
     let mut indices = vec![0; shape.route_len()];
     let mut weights = vec![0.0; shape.route_len()];
-    moe_route_into(scores, shape, &mut indices, &mut weights)?;
+    moe_route_into_host(scores, shape, &mut indices, &mut weights)?;
     Ok(MoeRoutingOutput { indices, weights })
 }
 
-pub fn moe_route_softmax(
+pub fn moe_route_softmax_host(
     scores: &[f32],
     shape: MoeRoutingShape,
 ) -> Result<MoeRoutingOutput, MoeRoutingError> {
     let mut indices = vec![0; shape.route_len()];
     let mut weights = vec![0.0; shape.route_len()];
-    moe_route_softmax_into(scores, shape, &mut indices, &mut weights)?;
+    moe_route_softmax_into_host(scores, shape, &mut indices, &mut weights)?;
     Ok(MoeRoutingOutput { indices, weights })
 }
 
-pub fn moe_route_into(
+pub fn moe_route_into_host(
     scores: &[f32],
     shape: MoeRoutingShape,
     indices: &mut [usize],
@@ -128,7 +128,7 @@ pub fn moe_route_into(
     Ok(())
 }
 
-pub fn moe_route_softmax_into(
+pub fn moe_route_softmax_into_host(
     scores: &[f32],
     shape: MoeRoutingShape,
     indices: &mut [usize],
@@ -301,12 +301,12 @@ mod tests {
         );
     }
 
-    /// Verifies sigmoid top-k routing selects the two highest-scored experts.
+    /// Verifies sigmoid_host top-k routing selects the two highest-scored experts.
     ///
-    /// This catches errors in the sigmoid transform or sort/select logic.
+    /// This catches errors in the sigmoid_host transform or sort/select logic.
     #[test]
     fn routes_single_token_with_sigmoid_top_k() {
-        let output = moe_route_token(&[0.0, 1.0, -1.0, 2.0], 2).unwrap();
+        let output = moe_route_token_host(&[0.0, 1.0, -1.0, 2.0], 2).unwrap();
 
         assert_eq!(output.indices, vec![3, 1]);
         approx_eq_slice(&output.weights, &[0.880797, 0.7310586]);
@@ -317,7 +317,7 @@ mod tests {
     /// This catches row-stride indexing errors in the batched routing path.
     #[test]
     fn routes_multiple_tokens_row_major() {
-        let output = moe_route(
+        let output = moe_route_host(
             &[0.0, 1.0, -1.0, 2.0, 5.0, -5.0, 0.5, 0.6],
             MoeRoutingShape::new(2, 4, 2),
         )
@@ -335,7 +335,7 @@ mod tests {
     /// This catches unstable or reversed tie-breaking in the sort comparator.
     #[test]
     fn ties_break_toward_lower_expert_index() {
-        let output = moe_route_token(&[0.0, 0.0, 1.0], 2).unwrap();
+        let output = moe_route_token_host(&[0.0, 0.0, 1.0], 2).unwrap();
 
         assert_eq!(output.indices, vec![2, 0]);
         approx_eq(output.weights[0], 0.7310586);
@@ -350,7 +350,7 @@ mod tests {
         let mut indices = [usize::MAX; 4];
         let mut weights = [-1.0; 4];
 
-        moe_route_into(
+        moe_route_into_host(
             &[0.1, 0.9, 0.5, -1.0, 0.0, 3.0],
             MoeRoutingShape::new(2, 3, 2),
             &mut indices,
@@ -362,12 +362,12 @@ mod tests {
         approx_eq_slice(&weights, &[0.7109495, 0.62245935, 0.95257413, 0.5]);
     }
 
-    /// Verifies softmax-normalized top-k routing with re-normalized selected weights.
+    /// Verifies softmax_host-normalized top-k routing with re-normalized selected weights.
     ///
-    /// This catches errors in the softmax computation or top-k re-normalization.
+    /// This catches errors in the softmax_host computation or top-k re-normalization.
     #[test]
     fn routes_with_softmax_normalized_top_k_weights() {
-        let output = moe_route_softmax(
+        let output = moe_route_softmax_host(
             &[
                 0.4390189, 1.2967792, 2.4748528, 1.1023278, -1.263859, 0.51365805, 0.672, -0.11,
             ],
@@ -384,7 +384,7 @@ mod tests {
     /// This catches panics on zero-length inputs.
     #[test]
     fn empty_token_batch_produces_empty_routes() {
-        let output = moe_route(&[], MoeRoutingShape::new(0, 4, 2)).unwrap();
+        let output = moe_route_host(&[], MoeRoutingShape::new(0, 4, 2)).unwrap();
 
         assert!(output.indices.is_empty());
         assert!(output.weights.is_empty());
@@ -395,7 +395,7 @@ mod tests {
     /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
-        let error = moe_route(&[], MoeRoutingShape::new(1, 0, 1)).unwrap_err();
+        let error = moe_route_host(&[], MoeRoutingShape::new(1, 0, 1)).unwrap_err();
         assert_eq!(
             error,
             MoeRoutingError::InvalidShape(MoeRoutingShape::new(1, 0, 1))
@@ -407,7 +407,7 @@ mod tests {
     /// This catches missing constraint validation between top_k and expert_count.
     #[test]
     fn rejects_top_k_larger_than_expert_count() {
-        let error = moe_route(&[0.0, 1.0], MoeRoutingShape::new(1, 2, 3)).unwrap_err();
+        let error = moe_route_host(&[0.0, 1.0], MoeRoutingShape::new(1, 2, 3)).unwrap_err();
         assert_eq!(
             error,
             MoeRoutingError::InvalidShape(MoeRoutingShape::new(1, 2, 3))
@@ -419,7 +419,7 @@ mod tests {
     /// This catches missing score length validation.
     #[test]
     fn rejects_score_length_mismatch() {
-        let error = moe_route(&[0.0, 1.0, 2.0], MoeRoutingShape::new(2, 2, 1)).unwrap_err();
+        let error = moe_route_host(&[0.0, 1.0, 2.0], MoeRoutingShape::new(2, 2, 1)).unwrap_err();
         assert_eq!(
             error,
             MoeRoutingError::LengthMismatch {
@@ -437,7 +437,7 @@ mod tests {
     fn rejects_indices_length_mismatch() {
         let mut indices = [0; 1];
         let mut weights = [0.0; 2];
-        let error = moe_route_into(
+        let error = moe_route_into_host(
             &[0.0, 1.0],
             MoeRoutingShape::new(1, 2, 2),
             &mut indices,
@@ -462,7 +462,7 @@ mod tests {
     fn rejects_weights_length_mismatch() {
         let mut indices = [0; 2];
         let mut weights = [0.0; 1];
-        let error = moe_route_into(
+        let error = moe_route_into_host(
             &[0.0, 1.0],
             MoeRoutingShape::new(1, 2, 2),
             &mut indices,
@@ -485,7 +485,7 @@ mod tests {
     /// This catches missing validation in the convenience wrapper.
     #[test]
     fn rejects_single_token_invalid_top_k() {
-        let error = moe_route_token(&[0.0, 1.0], 0).unwrap_err();
+        let error = moe_route_token_host(&[0.0, 1.0], 0).unwrap_err();
         assert_eq!(
             error,
             MoeRoutingError::InvalidShape(MoeRoutingShape::new(1, 2, 0))

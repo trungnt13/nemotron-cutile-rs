@@ -47,7 +47,7 @@ impl Conv1dShape {
 }
 
 pub const DEPTHWISE_CAUSAL_CONV1D: Conv1dKernel = Conv1dKernel {
-    name: "depthwise_causal_conv1d",
+    name: "depthwise_causal_conv1d_host",
     backend: Conv1dBackend::HostFallback,
 };
 
@@ -55,17 +55,17 @@ pub fn supported_conv1d_kernels() -> [Conv1dKernel; 1] {
     [DEPTHWISE_CAUSAL_CONV1D]
 }
 
-pub fn depthwise_causal_conv1d(
+pub fn depthwise_causal_conv1d_host(
     input: &[f32],
     weights: &[f32],
     shape: Conv1dShape,
 ) -> Result<Vec<f32>, Conv1dError> {
     let mut output = vec![0.0; shape.output_len()];
-    depthwise_causal_conv1d_into(input, weights, shape, &mut output)?;
+    depthwise_causal_conv1d_into_host(input, weights, shape, &mut output)?;
     Ok(output)
 }
 
-pub fn depthwise_causal_conv1d_into(
+pub fn depthwise_causal_conv1d_into_host(
     input: &[f32],
     weights: &[f32],
     shape: Conv1dShape,
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(
             supported_conv1d_kernels(),
             [Conv1dKernel {
-                name: "depthwise_causal_conv1d",
+                name: "depthwise_causal_conv1d_host",
                 backend: Conv1dBackend::HostFallback,
             }]
         );
@@ -179,7 +179,7 @@ mod tests {
     fn applies_single_channel_causal_filter() {
         let input = [1.0, 2.0, 3.0, 4.0];
         let weights = [2.0, 1.0];
-        let output = depthwise_causal_conv1d(&input, &weights, Conv1dShape::new(4, 1, 2)).unwrap();
+        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(4, 1, 2)).unwrap();
 
         approx_eq_slice(&output, &[1.0, 4.0, 7.0, 10.0]);
     }
@@ -199,7 +199,7 @@ mod tests {
             2.0, -1.0, //
         ];
 
-        let output = depthwise_causal_conv1d(&input, &weights, Conv1dShape::new(3, 2, 2)).unwrap();
+        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 2)).unwrap();
 
         approx_eq_slice(
             &output,
@@ -223,7 +223,7 @@ mod tests {
         ];
         let weights = [2.0, -0.5];
 
-        let output = depthwise_causal_conv1d(&input, &weights, Conv1dShape::new(3, 2, 1)).unwrap();
+        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 1)).unwrap();
 
         approx_eq_slice(
             &output,
@@ -250,7 +250,7 @@ mod tests {
         ];
         let mut output = [-1.0; 4];
 
-        depthwise_causal_conv1d_into(&input, &weights, Conv1dShape::new(2, 2, 2), &mut output)
+        depthwise_causal_conv1d_into_host(&input, &weights, Conv1dShape::new(2, 2, 2), &mut output)
             .unwrap();
 
         approx_eq_slice(&output, &[1.0, 0.0, 3.0, 10.0]);
@@ -261,7 +261,7 @@ mod tests {
     /// This catches panics on empty input slices.
     #[test]
     fn empty_sequence_produces_empty_output() {
-        let output = depthwise_causal_conv1d(&[], &[1.0, 2.0], Conv1dShape::new(0, 1, 2)).unwrap();
+        let output = depthwise_causal_conv1d_host(&[], &[1.0, 2.0], Conv1dShape::new(0, 1, 2)).unwrap();
         assert!(output.is_empty());
     }
 
@@ -270,7 +270,7 @@ mod tests {
     /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
-        let error = depthwise_causal_conv1d(&[], &[], Conv1dShape::new(1, 0, 1)).unwrap_err();
+        let error = depthwise_causal_conv1d_host(&[], &[], Conv1dShape::new(1, 0, 1)).unwrap_err();
         assert_eq!(error, Conv1dError::InvalidShape(Conv1dShape::new(1, 0, 1)));
     }
 
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn rejects_input_length_mismatch() {
         let error =
-            depthwise_causal_conv1d(&[1.0], &[1.0, 2.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
+            depthwise_causal_conv1d_host(&[1.0], &[1.0, 2.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
 
         assert_eq!(
             error,
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn rejects_weight_length_mismatch() {
         let error =
-            depthwise_causal_conv1d(&[1.0, 2.0], &[1.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
+            depthwise_causal_conv1d_host(&[1.0, 2.0], &[1.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
 
         assert_eq!(
             error,
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn rejects_output_length_mismatch() {
         let mut output = [0.0; 1];
-        let error = depthwise_causal_conv1d_into(
+        let error = depthwise_causal_conv1d_into_host(
             &[1.0, 2.0],
             &[1.0, 0.5],
             Conv1dShape::new(2, 1, 2),

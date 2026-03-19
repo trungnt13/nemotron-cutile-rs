@@ -1,7 +1,7 @@
 use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
-    name: "gemm",
+    name: "gemm_host",
     summary: "Matrix multiply kernels adapted from cutile-rs examples.",
 };
 
@@ -43,7 +43,7 @@ impl GemmShape {
 }
 
 pub const GEMM: GemmKernel = GemmKernel {
-    name: "gemm",
+    name: "gemm_host",
     backend: GemmBackend::HostFallback,
 };
 
@@ -51,13 +51,13 @@ pub fn supported_gemm_kernels() -> [GemmKernel; 1] {
     [GEMM]
 }
 
-pub fn gemm(lhs: &[f32], rhs: &[f32], shape: GemmShape) -> Result<Vec<f32>, GemmError> {
+pub fn gemm_host(lhs: &[f32], rhs: &[f32], shape: GemmShape) -> Result<Vec<f32>, GemmError> {
     let mut output = vec![0.0; shape.output_len()];
-    gemm_into(lhs, rhs, shape, &mut output)?;
+    gemm_into_host(lhs, rhs, shape, &mut output)?;
     Ok(output)
 }
 
-pub fn gemm_into(
+pub fn gemm_into_host(
     lhs: &[f32],
     rhs: &[f32],
     shape: GemmShape,
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(
             supported_gemm_kernels(),
             [GemmKernel {
-                name: "gemm",
+                name: "gemm_host",
                 backend: GemmBackend::HostFallback,
             }]
         );
@@ -163,7 +163,7 @@ mod tests {
     fn multiplies_square_matrices() {
         let lhs = [1.0, 2.0, 3.0, 4.0];
         let rhs = [5.0, 6.0, 7.0, 8.0];
-        let output = gemm(&lhs, &rhs, GemmShape::new(2, 2, 2)).unwrap();
+        let output = gemm_host(&lhs, &rhs, GemmShape::new(2, 2, 2)).unwrap();
 
         approx_eq_slice(&output, &[19.0, 22.0, 43.0, 50.0]);
     }
@@ -175,7 +175,7 @@ mod tests {
     fn multiplies_rectangular_matrices() {
         let lhs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let rhs = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
-        let output = gemm(&lhs, &rhs, GemmShape::new(2, 3, 2)).unwrap();
+        let output = gemm_host(&lhs, &rhs, GemmShape::new(2, 3, 2)).unwrap();
 
         approx_eq_slice(&output, &[58.0, 64.0, 139.0, 154.0]);
     }
@@ -187,7 +187,7 @@ mod tests {
     fn identity_matrix_preserves_input() {
         let lhs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
         let rhs = [1.0, 0.0, 0.0, 1.0];
-        let output = gemm(&lhs, &rhs, GemmShape::new(3, 2, 2)).unwrap();
+        let output = gemm_host(&lhs, &rhs, GemmShape::new(3, 2, 2)).unwrap();
 
         approx_eq_slice(&output, &lhs);
     }
@@ -199,7 +199,7 @@ mod tests {
     fn accumulates_in_f32_output_with_f64_intermediate() {
         let lhs = [0.1, 0.2, 0.3, 0.4];
         let rhs = [0.5, 0.6, 0.7, 0.8];
-        let output = gemm(&lhs, &rhs, GemmShape::new(2, 2, 2)).unwrap();
+        let output = gemm_host(&lhs, &rhs, GemmShape::new(2, 2, 2)).unwrap();
 
         approx_eq_slice(&output, &[0.19, 0.22, 0.43, 0.50]);
     }
@@ -213,7 +213,7 @@ mod tests {
         let rhs = [1.0, 0.0, 0.0, 1.0];
         let mut output = [-1.0; 4];
 
-        gemm_into(&lhs, &rhs, GemmShape::new(2, 2, 2), &mut output).unwrap();
+        gemm_into_host(&lhs, &rhs, GemmShape::new(2, 2, 2), &mut output).unwrap();
 
         approx_eq_slice(&output, &lhs);
     }
@@ -223,7 +223,7 @@ mod tests {
     /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
-        let error = gemm(&[1.0], &[1.0], GemmShape::new(0, 1, 1)).unwrap_err();
+        let error = gemm_host(&[1.0], &[1.0], GemmShape::new(0, 1, 1)).unwrap_err();
         assert_eq!(error, GemmError::InvalidShape(GemmShape::new(0, 1, 1)));
     }
 
@@ -232,7 +232,7 @@ mod tests {
     /// This catches missing lhs length validation.
     #[test]
     fn rejects_lhs_length_mismatch() {
-        let error = gemm(&[1.0], &[1.0, 2.0], GemmShape::new(1, 2, 1)).unwrap_err();
+        let error = gemm_host(&[1.0], &[1.0, 2.0], GemmShape::new(1, 2, 1)).unwrap_err();
         assert_eq!(
             error,
             GemmError::LengthMismatch {
@@ -248,7 +248,7 @@ mod tests {
     /// This catches missing rhs length validation.
     #[test]
     fn rejects_rhs_length_mismatch() {
-        let error = gemm(&[1.0, 2.0], &[1.0], GemmShape::new(1, 2, 1)).unwrap_err();
+        let error = gemm_host(&[1.0, 2.0], &[1.0], GemmShape::new(1, 2, 1)).unwrap_err();
         assert_eq!(
             error,
             GemmError::LengthMismatch {
@@ -267,7 +267,7 @@ mod tests {
         let lhs = [1.0, 2.0];
         let rhs = [3.0, 4.0, 5.0, 6.0];
         let mut output = [0.0; 1];
-        let error = gemm_into(&lhs, &rhs, GemmShape::new(1, 2, 2), &mut output).unwrap_err();
+        let error = gemm_into_host(&lhs, &rhs, GemmShape::new(1, 2, 2), &mut output).unwrap_err();
 
         assert_eq!(
             error,
