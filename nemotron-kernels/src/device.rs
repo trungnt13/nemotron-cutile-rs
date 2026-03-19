@@ -21,20 +21,19 @@ mod inner {
     use std::sync::Arc;
 
     pub struct DeviceInner {
-        pub(crate) context: Arc<cuda_core::CudaContext>,
-        pub(crate) stream: Arc<cuda_core::CudaStream>,
+        pub(crate) context: Arc<cutile::cuda_core::CudaContext>,
+        pub(crate) stream: Arc<cutile::cuda_core::CudaStream>,
         pub(crate) ordinal: usize,
     }
 
     impl DeviceInner {
         pub fn new(ordinal: usize) -> Result<Self, TensorError> {
-            let context = cuda_core::CudaContext::new(ordinal)
+            let context = cutile::cuda_core::CudaContext::new(ordinal)
                 .map_err(|e| TensorError::DeviceError(format!("failed to create context: {e:?}")))?;
             let stream = context
                 .new_stream()
                 .map_err(|e| TensorError::DeviceError(format!("failed to create stream: {e:?}")))?;
-            // Initialize cutile async device contexts
-            cuda_async::device_context::init_device_contexts(ordinal, 1)
+            cutile::cuda_async::device_context::init_device_contexts(ordinal, 1)
                 .map_err(|e| TensorError::DeviceError(format!("failed to init device: {e:?}")))?;
             Ok(Self {
                 context,
@@ -131,13 +130,13 @@ impl GpuDevice {
 
     /// Access the underlying CUDA context (Linux only).
     #[cfg(target_os = "linux")]
-    pub fn cuda_context(&self) -> &Arc<cuda_core::CudaContext> {
+    pub fn cuda_context(&self) -> &Arc<cutile::cuda_core::CudaContext> {
         &self.inner.context
     }
 
     /// Access the default CUDA stream (Linux only).
     #[cfg(target_os = "linux")]
-    pub fn cuda_stream(&self) -> &Arc<cuda_core::CudaStream> {
+    pub fn cuda_stream(&self) -> &Arc<cutile::cuda_core::CudaStream> {
         &self.inner.stream
     }
 }
