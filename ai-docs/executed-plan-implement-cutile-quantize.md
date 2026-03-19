@@ -139,9 +139,9 @@ Remote commands:
 
 ```bash
 cd ~/codes/nemotron-cutile-rs--cutile-quantize
-export PATH="$HOME/.cargo/bin:/usr/local/cuda-13.2/bin:/usr/lib/llvm-21/bin:$PATH"
-export CUDA_TOOLKIT_PATH=/usr/local/cuda-13.2
-export CUDA_PATH=/usr/local/cuda-13.2
+export PATH="$HOME/.cargo/bin:/usr/local/cuda-13/bin:/usr/lib/llvm-21/bin:$PATH"
+export CUDA_TOOLKIT_PATH=/usr/local/cuda-13
+export CUDA_PATH=/usr/local/cuda-13
 export CUDA_TILE_USE_LLVM_INSTALL_DIR=/usr/lib/llvm-21
 export LLVM_SYS_210_PREFIX=/usr/lib/llvm-21
 export LLVM_CONFIG_PATH=/usr/lib/llvm-21/bin/llvm-config
@@ -157,5 +157,5 @@ Observed remote results on `tn` (`NVIDIA GeForce RTX 3090`, driver `595.45.04`):
 
 ### Validation notes
 
-- An initial remote run exposed that the cutile kernel path requires the CUDA/LLVM toolchain binaries on `PATH`; the final validation command includes those explicitly.
+- An initial remote run (shell `980`) failed because the CUDA/LLVM toolchain binaries were not fully available on `PATH`; the corrected known-good `tn` environment uses `/usr/local/cuda-13/bin` and `/usr/lib/llvm-21/bin` explicitly.
 - Another Linux-only iteration showed that non-power-of-two cutile lengths and in-kernel `u8 -> f32` conversion were not safe contracts to assume, so the final implementation narrowed dispatch and kept those steps on the host boundary.
