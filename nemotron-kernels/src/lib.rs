@@ -1,6 +1,7 @@
 pub mod activations;
 pub mod attention;
 pub mod conv1d;
+pub mod device;
 pub mod embedding;
 pub mod gemm;
 pub mod moe_routing;
@@ -8,6 +9,7 @@ pub mod quantize;
 pub mod rms_norm;
 pub mod softmax;
 pub mod ssm;
+pub mod tensor;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KernelStub {
