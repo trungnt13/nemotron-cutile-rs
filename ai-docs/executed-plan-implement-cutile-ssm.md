@@ -133,12 +133,12 @@ Rsync command:
 rsync -az --exclude target --exclude .git ./ tn:~/codes/nemotron-cutile-rs--cutile-ssm/
 ```
 
-Environment used on `tn` for every remote command:
+Known-good environment used on `tn` for the successful remote rerun:
 
 ```bash
-export PATH="$HOME/.cargo/bin:/usr/local/cuda-13.2/bin:/usr/lib/llvm-21/bin:$PATH"
-export CUDA_TOOLKIT_PATH=/usr/local/cuda-13.2
-export CUDA_PATH=/usr/local/cuda-13.2
+export PATH="$HOME/.cargo/bin:/usr/local/cuda-13/bin:/usr/lib/llvm-21/bin:$PATH"
+export CUDA_TOOLKIT_PATH=/usr/local/cuda-13
+export CUDA_PATH=/usr/local/cuda-13
 export CUDA_TILE_USE_LLVM_INSTALL_DIR=/usr/lib/llvm-21
 export LLVM_SYS_210_PREFIX=/usr/lib/llvm-21
 export LLVM_CONFIG_PATH=/usr/lib/llvm-21/bin/llvm-config
@@ -155,6 +155,7 @@ cargo build --workspace --quiet &&   cargo test --workspace --quiet --     --ski
 Observed remote results on `tn`:
 
 - `cargo test -p nemotron-kernels ssm --quiet` ✅ **13 passed** (this exercised the Linux cutile path)
+- retrying the earlier failing `/usr/local/cuda-13.2` shell with the known-good `/usr/local/cuda-13` environment fixed the remote SSM validation failure
 - `cargo test --workspace --quiet` ⚠️ **failed only in fixture-dependent `nemotron-validate` tests** because `/home/trungnt13/codes/nemotron-cutile-rs--cutile-ssm/data/reference_kernels/fixtures.json` was not present on the remote path
 - `cargo build --workspace --quiet` ✅ passed
 - skipped workspace command ✅ all executed tests passed:
