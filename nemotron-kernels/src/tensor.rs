@@ -20,6 +20,10 @@ pub enum TensorError {
         got_numel: usize,
     },
     EmptyShape,
+    ZeroSizedDimension {
+        index: usize,
+    },
+    ShapeOverflow,
     DeviceError(String),
 }
 
@@ -34,6 +38,13 @@ impl fmt::Display for TensorError {
                 "tensor shape expects {expected_numel} elements but got {got_numel}"
             ),
             Self::EmptyShape => write!(f, "tensor shape must have at least one dimension"),
+            Self::ZeroSizedDimension { index } => {
+                write!(
+                    f,
+                    "tensor shape dimension {index} must be greater than zero"
+                )
+            }
+            Self::ShapeOverflow => write!(f, "tensor shape element count overflowed usize"),
             Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
@@ -68,21 +79,33 @@ mod inner {
     unsafe impl Send for SyncCudaRuntime {}
     unsafe impl Sync for SyncCudaRuntime {}
 
-    static SYNC_RUNTIME: OnceLock<SyncCudaRuntime> = OnceLock::new();
-
-    fn sync_stream() -> &'static Arc<CudaStream> {
-        &SYNC_RUNTIME
-            .get_or_init(|| {
-                let context = CudaContext::new(0).expect("CUDA context init for sync tensor ops");
-                let stream = context
-                    .new_stream()
-                    .expect("CUDA stream for sync tensor ops");
-                SyncCudaRuntime {
-                    _context: context,
-                    stream,
-                }
+    impl SyncCudaRuntime {
+        fn new() -> Result<Self, TensorError> {
+            let context = CudaContext::new(0).map_err(|e| {
+                TensorError::DeviceError(format!(
+                    "failed to create CUDA context for sync tensor ops: {e:?}"
+                ))
+            })?;
+            let stream = context.new_stream().map_err(|e| {
+                TensorError::DeviceError(format!(
+                    "failed to create CUDA stream for sync tensor ops: {e:?}"
+                ))
+            })?;
+            Ok(Self {
+                _context: context,
+                stream,
             })
-            .stream
+        }
+    }
+
+    static SYNC_RUNTIME: OnceLock<Result<SyncCudaRuntime, TensorError>> = OnceLock::new();
+
+    fn sync_stream() -> Result<&'static Arc<CudaStream>, TensorError> {
+        SYNC_RUNTIME
+            .get_or_init(SyncCudaRuntime::new)
+            .as_ref()
+            .map(|runtime| &runtime.stream)
+            .map_err(Clone::clone)
     }
 
     /// Wraps `cutile::tensor::Tensor<f32>` on Linux.
@@ -91,24 +114,28 @@ mod inner {
     }
 
     impl TensorInner {
-        pub fn zeros(numel: usize) -> Self {
+        pub fn zeros(numel: usize) -> Result<Self, TensorError> {
             let data = Arc::new(vec![0.0f32; numel]);
             let tensor = cutile::api::copy_host_vec_to_device(&data)
-                .sync_on(sync_stream())
-                .expect("cutile zeros allocation");
-            Self {
+                .sync_on(sync_stream()?)
+                .map_err(|e| {
+                    TensorError::DeviceError(format!("cutile zeros allocation failed: {e:?}"))
+                })?;
+            Ok(Self {
                 tensor: Arc::new(tensor),
-            }
+            })
         }
 
-        pub fn from_host(data: &[f32]) -> Self {
+        pub fn from_host(data: &[f32]) -> Result<Self, TensorError> {
             let data = Arc::new(data.to_vec());
             let tensor = cutile::api::copy_host_vec_to_device(&data)
-                .sync_on(sync_stream())
-                .expect("cutile host-to-device copy");
-            Self {
+                .sync_on(sync_stream()?)
+                .map_err(|e| {
+                    TensorError::DeviceError(format!("cutile host-to-device copy failed: {e:?}"))
+                })?;
+            Ok(Self {
                 tensor: Arc::new(tensor),
-            }
+            })
         }
 
         pub async fn from_host_async(data: &[f32]) -> Result<Self, TensorError> {
@@ -121,11 +148,13 @@ mod inner {
             })
         }
 
-        pub fn to_host(&self) -> Vec<f32> {
+        pub fn to_host(&self) -> Result<Vec<f32>, TensorError> {
             (&self.tensor)
                 .to_host_vec()
-                .sync_on(sync_stream())
-                .expect("cutile device-to-host copy")
+                .sync_on(sync_stream()?)
+                .map_err(|e| {
+                    TensorError::DeviceError(format!("cutile device-to-host copy failed: {e:?}"))
+                })
         }
 
         pub async fn to_host_async(&self) -> Result<Vec<f32>, TensorError> {
@@ -167,24 +196,24 @@ mod inner {
     }
 
     impl TensorInner {
-        pub fn zeros(numel: usize) -> Self {
-            Self {
+        pub fn zeros(numel: usize) -> Result<Self, TensorError> {
+            Ok(Self {
                 data: vec![0.0f32; numel],
-            }
+            })
         }
 
-        pub fn from_host(data: &[f32]) -> Self {
-            Self {
+        pub fn from_host(data: &[f32]) -> Result<Self, TensorError> {
+            Ok(Self {
                 data: data.to_vec(),
-            }
+            })
         }
 
         pub async fn from_host_async(data: &[f32]) -> Result<Self, TensorError> {
-            Ok(Self::from_host(data))
+            Self::from_host(data)
         }
 
-        pub fn to_host(&self) -> Vec<f32> {
-            self.data.clone()
+        pub fn to_host(&self) -> Result<Vec<f32>, TensorError> {
+            Ok(self.data.clone())
         }
 
         pub async fn to_host_async(&self) -> Result<Vec<f32>, TensorError> {
@@ -229,7 +258,7 @@ impl GpuTensor {
     pub fn zeros(shape: &[usize]) -> Result<Self, TensorError> {
         let numel = shape_numel(shape)?;
         Ok(Self {
-            inner: inner::TensorInner::zeros(numel),
+            inner: inner::TensorInner::zeros(numel)?,
             shape: shape.to_vec(),
         })
     }
@@ -244,7 +273,7 @@ impl GpuTensor {
             });
         }
         Ok(Self {
-            inner: inner::TensorInner::from_host(data),
+            inner: inner::TensorInner::from_host(data)?,
             shape: shape.to_vec(),
         })
     }
@@ -266,9 +295,24 @@ impl GpuTensor {
 
     // -- Data transfer ------------------------------------------------------
 
-    /// Copy tensor data back to host memory.
-    pub fn to_host(&self) -> Vec<f32> {
+    /// Copy tensor data back to host memory, returning an error on transfer
+    /// failure.
+    pub fn try_to_host(&self) -> Result<Vec<f32>, TensorError> {
         self.inner.to_host()
+    }
+
+    /// Copy tensor data back to host memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying synchronous device-to-host transfer fails.
+    /// Prefer [`try_to_host`](Self::try_to_host) when the caller can handle
+    /// transfer errors explicitly.
+    pub fn to_host(&self) -> Vec<f32> {
+        match self.try_to_host() {
+            Ok(data) => data,
+            Err(err) => panic!("failed to copy tensor to host: {err}"),
+        }
     }
 
     /// Async variant of [`to_host`](Self::to_host).
@@ -299,7 +343,7 @@ impl GpuTensor {
 
     /// Total number of elements.
     pub fn numel(&self) -> usize {
-        self.shape.iter().copied().product::<usize>().max(1)
+        self.shape.iter().copied().product()
     }
 
     // -- Reshaping ----------------------------------------------------------
@@ -348,7 +392,16 @@ fn shape_numel(shape: &[usize]) -> Result<usize, TensorError> {
     if shape.is_empty() {
         return Err(TensorError::EmptyShape);
     }
-    Ok(shape.iter().copied().product::<usize>())
+    shape
+        .iter()
+        .copied()
+        .enumerate()
+        .try_fold(1usize, |numel, (index, dim)| {
+            if dim == 0 {
+                return Err(TensorError::ZeroSizedDimension { index });
+            }
+            numel.checked_mul(dim).ok_or(TensorError::ShapeOverflow)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +472,31 @@ mod tests {
     fn rejects_empty_shape() {
         let err = GpuTensor::zeros(&[]).unwrap_err();
         assert!(matches!(err, TensorError::EmptyShape));
+    }
+
+    /// Verifies that zero-sized dimensions are rejected during shape validation.
+    /// This catches invalid zero-element allocations and inconsistent numel accounting.
+    #[test]
+    fn rejects_zero_sized_dimension() {
+        let err = GpuTensor::zeros(&[2, 0, 3]).unwrap_err();
+        assert!(matches!(err, TensorError::ZeroSizedDimension { index: 1 }));
+    }
+
+    /// Verifies that overflowing shapes are rejected before allocation.
+    /// This catches silent usize wraparound in element-count validation.
+    #[test]
+    fn rejects_overflowing_shape() {
+        let err = GpuTensor::zeros(&[usize::MAX, 2]).unwrap_err();
+        assert!(matches!(err, TensorError::ShapeOverflow));
+    }
+
+    /// Verifies that the fallible sync host-copy path matches the convenience wrapper.
+    /// This catches regressions in sync device-to-host error plumbing.
+    #[test]
+    fn try_to_host_matches_to_host() {
+        let data: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let t = GpuTensor::from_host(&data, &[2, 3]).unwrap();
+        assert_eq!(t.try_to_host().unwrap(), t.to_host());
     }
 
     /// Verifies that the async constructor works identically to the sync one.

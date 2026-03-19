@@ -20,6 +20,8 @@ mod inner {
     use super::TensorError;
     use std::sync::Arc;
 
+    use cutile::cuda_async::device_context::{get_default_device, init_device_contexts};
+
     pub struct DeviceInner {
         pub(crate) context: Arc<cutile::cuda_core::CudaContext>,
         pub(crate) stream: Arc<cutile::cuda_core::CudaStream>,
@@ -28,13 +30,22 @@ mod inner {
 
     impl DeviceInner {
         pub fn new(ordinal: usize) -> Result<Self, TensorError> {
-            let context = cutile::cuda_core::CudaContext::new(ordinal)
-                .map_err(|e| TensorError::DeviceError(format!("failed to create context: {e:?}")))?;
+            if let Err(e) = init_device_contexts(ordinal, 1) {
+                let message = e.to_string();
+                let already_initialized = message.contains("Context already initialized");
+                let default_device = get_default_device();
+                if !already_initialized || default_device != ordinal {
+                    return Err(TensorError::DeviceError(format!(
+                        "failed to init async device context for cuda:{ordinal} (default device: cuda:{default_device}): {message}"
+                    )));
+                }
+            }
+            let context = cutile::cuda_core::CudaContext::new(ordinal).map_err(|e| {
+                TensorError::DeviceError(format!("failed to create context: {e:?}"))
+            })?;
             let stream = context
                 .new_stream()
                 .map_err(|e| TensorError::DeviceError(format!("failed to create stream: {e:?}")))?;
-            cutile::cuda_async::device_context::init_device_contexts(ordinal, 1)
-                .map_err(|e| TensorError::DeviceError(format!("failed to init device: {e:?}")))?;
             Ok(Self {
                 context,
                 stream,
@@ -169,5 +180,14 @@ mod tests {
     fn synchronize_succeeds() {
         let device = GpuDevice::new(0).unwrap();
         device.synchronize().unwrap();
+    }
+
+    /// Verifies that constructing the same device twice on one thread succeeds.
+    /// This catches repeated cutile async-context initialization failures.
+    #[test]
+    fn recreates_same_device_on_same_thread() {
+        let first = GpuDevice::new(0).unwrap();
+        let second = GpuDevice::new(0).unwrap();
+        assert_eq!(first.ordinal(), second.ordinal());
     }
 }
