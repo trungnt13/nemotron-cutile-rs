@@ -1,0 +1,3 @@
+{
+    "window.title": "${activeEditorFull}${separator}${rootName}${separator}[Branch: main]"
+}

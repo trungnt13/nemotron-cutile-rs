@@ -16,7 +16,8 @@ const DEFAULT_KERNEL_REFERENCE_DIR: &str = "data/reference_kernels";
 const DEFAULT_OUTPUT_REFERENCE_DIR: &str = "data/reference_outputs";
 const DEFAULT_TOLERANCE: f32 = 1e-4;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut args = std::env::args().skip(1);
     let kernel_reference_dir = args
         .next()

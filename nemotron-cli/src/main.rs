@@ -1,6 +1,7 @@
 use nemotron_model::{generation_preview, GenerationRequest, NemotronModel};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let prompt = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "Hello from nemotron-rs".to_string());
