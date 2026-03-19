@@ -19,7 +19,7 @@ use std::time::Instant;
 const BENCHMARK_ITERATIONS: usize = 25;
 const E2E_TOLERANCE: f32 = 1e-5;
 const GEMM_ALIGNED_DIM: usize = 64;
-const GPU_WRAPPER_NOTE: &str = "Linux now runs real cutile device compute for RMSNorm, softmax on power-of-two flattened widths up to 4096, and GEMM when shapes are aligned to its 16x16x8 tile requirements. Remaining GPU wrapper paths still delegate to host kernels, and unsupported/non-Linux cases continue to use the host bridge.";
+const GPU_WRAPPER_NOTE: &str = "Linux now runs real cutile device compute for RMSNorm, softmax on power-of-two flattened widths up to 4096, GEMM when shapes are aligned to its 16x16x8 tile requirements, and the elementwise activation wrappers (SiLU, ReLU², sigmoid) when their flattened width is also a supported power of two up to 4096. Remaining GPU wrapper paths still delegate to host kernels, and unsupported/non-Linux cases continue to use the host bridge.";
 const GEMM_BENCHMARK_NOTE: &str = "benchmark/gemm uses bundled fixtures, while benchmark/gemm-aligned exercises a synthetic 64x64x64 GEMM that can hit the real cutile kernel on Linux.";
 const MODEL_BENCHMARK_NOTE: &str = "Model-level benchmark uses the bundled synthetic e2e runtime to compare forward_tokens against forward_tokens_gpu.";
 
