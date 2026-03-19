@@ -114,35 +114,45 @@ mod inner {
     }
 
     impl TensorInner {
-        pub fn zeros(numel: usize) -> Result<Self, TensorError> {
+        pub fn from_cutile_tensor(tensor: cutile::tensor::Tensor<f32>) -> Self {
+            Self {
+                tensor: Arc::new(tensor),
+            }
+        }
+
+        pub fn zeros(shape: &[usize]) -> Result<Self, TensorError> {
+            let numel: usize = shape.iter().product();
             let data = Arc::new(vec![0.0f32; numel]);
             let tensor = cutile::api::copy_host_vec_to_device(&data)
                 .sync_on(sync_stream()?)
                 .map_err(|e| {
                     TensorError::DeviceError(format!("cutile zeros allocation failed: {e:?}"))
-                })?;
+                })?
+                .reshape_dyn(shape);
             Ok(Self {
                 tensor: Arc::new(tensor),
             })
         }
 
-        pub fn from_host(data: &[f32]) -> Result<Self, TensorError> {
+        pub fn from_host(data: &[f32], shape: &[usize]) -> Result<Self, TensorError> {
             let data = Arc::new(data.to_vec());
             let tensor = cutile::api::copy_host_vec_to_device(&data)
                 .sync_on(sync_stream()?)
                 .map_err(|e| {
                     TensorError::DeviceError(format!("cutile host-to-device copy failed: {e:?}"))
-                })?;
+                })?
+                .reshape_dyn(shape);
             Ok(Self {
                 tensor: Arc::new(tensor),
             })
         }
 
-        pub async fn from_host_async(data: &[f32]) -> Result<Self, TensorError> {
+        pub async fn from_host_async(data: &[f32], shape: &[usize]) -> Result<Self, TensorError> {
             let data = Arc::new(data.to_vec());
             let tensor = cutile::api::copy_host_vec_to_device(&data)
                 .await
-                .map_err(|e| TensorError::DeviceError(format!("{e:?}")))?;
+                .map_err(|e| TensorError::DeviceError(format!("{e:?}")))?
+                .reshape_dyn(shape);
             Ok(Self {
                 tensor: Arc::new(tensor),
             })
@@ -196,20 +206,21 @@ mod inner {
     }
 
     impl TensorInner {
-        pub fn zeros(numel: usize) -> Result<Self, TensorError> {
+        pub fn zeros(shape: &[usize]) -> Result<Self, TensorError> {
+            let numel: usize = shape.iter().product();
             Ok(Self {
                 data: vec![0.0f32; numel],
             })
         }
 
-        pub fn from_host(data: &[f32]) -> Result<Self, TensorError> {
+        pub fn from_host(data: &[f32], _shape: &[usize]) -> Result<Self, TensorError> {
             Ok(Self {
                 data: data.to_vec(),
             })
         }
 
-        pub async fn from_host_async(data: &[f32]) -> Result<Self, TensorError> {
-            Self::from_host(data)
+        pub async fn from_host_async(data: &[f32], shape: &[usize]) -> Result<Self, TensorError> {
+            Self::from_host(data, shape)
         }
 
         pub fn to_host(&self) -> Result<Vec<f32>, TensorError> {
@@ -256,9 +267,9 @@ impl GpuTensor {
 
     /// Create a zero-filled tensor with the given shape.
     pub fn zeros(shape: &[usize]) -> Result<Self, TensorError> {
-        let numel = shape_numel(shape)?;
+        shape_numel(shape)?;
         Ok(Self {
-            inner: inner::TensorInner::zeros(numel)?,
+            inner: inner::TensorInner::zeros(shape)?,
             shape: shape.to_vec(),
         })
     }
@@ -273,7 +284,26 @@ impl GpuTensor {
             });
         }
         Ok(Self {
-            inner: inner::TensorInner::from_host(data)?,
+            inner: inner::TensorInner::from_host(data, shape)?,
+            shape: shape.to_vec(),
+        })
+    }
+
+    /// Wrap an existing Linux cutile tensor without copying data back through the host.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_cutile_tensor(
+        tensor: cutile::tensor::Tensor<f32>,
+        shape: &[usize],
+    ) -> Result<Self, TensorError> {
+        let numel = shape_numel(shape)?;
+        if tensor.size() != numel {
+            return Err(TensorError::ShapeMismatch {
+                expected_numel: numel,
+                got_numel: tensor.size(),
+            });
+        }
+        Ok(Self {
+            inner: inner::TensorInner::from_cutile_tensor(tensor),
             shape: shape.to_vec(),
         })
     }
@@ -288,7 +318,7 @@ impl GpuTensor {
             });
         }
         Ok(Self {
-            inner: inner::TensorInner::from_host_async(data).await?,
+            inner: inner::TensorInner::from_host_async(data, shape).await?,
             shape: shape.to_vec(),
         })
     }
@@ -369,6 +399,37 @@ impl GpuTensor {
     #[cfg(target_os = "linux")]
     pub fn cutile_tensor(&self) -> &Arc<cutile::tensor::Tensor<f32>> {
         self.inner.cutile_tensor()
+    }
+
+    /// Returns the underlying cutile tensor reshaped for the requested logical shape.
+    ///
+    /// When the current device tensor already has the requested shape this is a cheap `Arc`
+    /// clone; otherwise it performs a device-to-device copy before updating tensor metadata.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn cutile_tensor_for_shape(
+        &self,
+        shape: &[usize],
+    ) -> Result<Arc<cutile::tensor::Tensor<f32>>, TensorError> {
+        let expected_numel = shape_numel(shape)?;
+        if self.numel() != expected_numel {
+            return Err(TensorError::ShapeMismatch {
+                expected_numel,
+                got_numel: self.numel(),
+            });
+        }
+
+        let desired_shape = shape.iter().map(|dim| *dim as i32).collect::<Vec<_>>();
+        if self.cutile_tensor().shape == desired_shape {
+            return Ok(self.cutile_tensor().clone());
+        }
+
+        let reshaped = self
+            .cutile_tensor()
+            .copy()
+            .await
+            .map_err(|error| TensorError::DeviceError(format!("{error:?}")))?
+            .reshape_dyn(shape);
+        Ok(Arc::new(reshaped))
     }
 
     /// On non-Linux platforms, return a reference to the host data buffer.

@@ -3,7 +3,7 @@ use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "softmax_host",
-    summary: "Numerically stable softmax_host kernels.",
+    summary: "Numerically stable softmax kernels.",
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +18,13 @@ pub struct SoftmaxKernel {
     pub backend: SoftmaxBackend,
 }
 
+#[cfg(target_os = "linux")]
+pub const SOFTMAX: SoftmaxKernel = SoftmaxKernel {
+    name: "softmax_cutile",
+    backend: SoftmaxBackend::Cutile,
+};
+
+#[cfg(not(target_os = "linux"))]
 pub const SOFTMAX: SoftmaxKernel = SoftmaxKernel {
     name: "softmax_host",
     backend: SoftmaxBackend::HostFallback,
@@ -26,6 +33,9 @@ pub const SOFTMAX: SoftmaxKernel = SoftmaxKernel {
 pub fn supported_softmax_kernels() -> [SoftmaxKernel; 1] {
     [SOFTMAX]
 }
+
+#[cfg(any(target_os = "linux", test))]
+const CUTILE_SOFTMAX_MAX_WIDTH: usize = 4096;
 
 pub fn softmax_host(values: &[f32]) -> Vec<f32> {
     let mut output = vec![0.0; values.len()];
@@ -85,15 +95,94 @@ impl From<TensorError> for SoftmaxError {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn supports_cutile_softmax(numel: usize) -> bool {
+    numel > 0
+        && numel <= CUTILE_SOFTMAX_MAX_WIDTH
+        && numel.is_power_of_two()
+        && i32::try_from(numel).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+#[cutile::module]
+mod cutile_softmax {
+    use cutile::core::*;
+
+    #[cutile::entry()]
+    fn softmax<const BM: i32, const BN: i32>(
+        x: &Tensor<f32, { [-1, -1] }>,
+        y: &mut Tensor<f32, { [BM, BN] }>,
+    ) {
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
+        let tile_x_max: Tile<f32, { [BM, BN] }> =
+            tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
+        let numerator: Tile<f32, { [BM, BN] }> = exp(tile_x - tile_x_max);
+        let denominator: Tile<f32, { [BM] }> = reduce_sum(numerator, 1i32);
+        let denominator = denominator
+            .reshape(const_shape![BM, 1])
+            .broadcast(y.shape());
+        y.store(numerator / denominator);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Async GPU API
 // ---------------------------------------------------------------------------
 
-/// Async GPU softmax normalization.
-pub async fn softmax(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
+async fn softmax_host_bridge(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
     let data = input.to_host_async().await?;
     let result = softmax_host(&data);
     Ok(GpuTensor::from_host_async(&result, input.shape()).await?)
+}
+
+#[cfg(target_os = "linux")]
+fn active_backend(input: &GpuTensor) -> SoftmaxBackend {
+    if supports_cutile_softmax(input.numel()) {
+        SoftmaxBackend::Cutile
+    } else {
+        SoftmaxBackend::HostFallback
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn active_backend(_input: &GpuTensor) -> SoftmaxBackend {
+    SoftmaxBackend::HostFallback
+}
+
+#[cfg(target_os = "linux")]
+async fn softmax_cutile(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
+    use cutile::api;
+    use cutile::tile_kernel::{IntoDeviceOperation, IntoDeviceOperationPartition, TileKernel};
+
+    let numel = input.numel();
+    let partition_width = i32::try_from(numel).map_err(|_| {
+        SoftmaxError::DeviceError(format!(
+            "cutile softmax width {numel} exceeds the supported i32 launch bound"
+        ))
+    })?;
+    let flattened_input = input.cutile_tensor_for_shape(&[1, numel]).await?;
+    let output = api::zeros::<2, f32>([1, numel]).partition([1, partition_width]);
+    let generics = vec!["1".to_string(), numel.to_string()];
+    let (_input, output) =
+        cutile_softmax::softmax_async(flattened_input.device_operation(), output)
+            .generics(generics)
+            .await
+            .map_err(|error| {
+                SoftmaxError::DeviceError(format!("cutile softmax launch failed: {error:?}"))
+            })?;
+    GpuTensor::from_cutile_tensor(output.unpartition(), input.shape()).map_err(SoftmaxError::from)
+}
+
+/// Async GPU softmax normalization.
+pub async fn softmax(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
+    match active_backend(input) {
+        #[cfg(target_os = "linux")]
+        SoftmaxBackend::Cutile => softmax_cutile(input).await,
+        SoftmaxBackend::HostFallback => softmax_host_bridge(input).await,
+        #[cfg(not(target_os = "linux"))]
+        SoftmaxBackend::Cutile => unreachable!("cutile backend is unavailable on this platform"),
+    }
 }
 
 #[cfg(test)]
@@ -108,18 +197,48 @@ mod tests {
         );
     }
 
-    /// Verifies that the softmax_host kernel reports HostFallback as its backend.
+    fn approx_slice_eq(lhs: &[f32], rhs: &[f32], tolerance: f32) {
+        assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
+        for (left, right) in lhs.iter().zip(rhs.iter()) {
+            let diff = (left - right).abs();
+            assert!(
+                diff <= tolerance,
+                "values differ: left={left:?}, right={right:?}, diff={diff:?}, tolerance={tolerance:?}"
+            );
+        }
+    }
+
+    /// Verifies that the softmax kernel registry reports the active primary backend for the current platform.
     ///
-    /// This catches accidental backend tag changes before GPU kernels exist.
+    /// This catches accidental backend tag changes as Linux adds cutile compute while other platforms keep host fallback.
     #[test]
-    fn reports_host_fallback_backend_for_now() {
-        assert_eq!(
-            supported_softmax_kernels(),
-            [SoftmaxKernel {
-                name: "softmax_host",
-                backend: SoftmaxBackend::HostFallback,
-            }]
-        );
+    fn reports_platform_primary_backend() {
+        #[cfg(target_os = "linux")]
+        let expected = [SoftmaxKernel {
+            name: "softmax_cutile",
+            backend: SoftmaxBackend::Cutile,
+        }];
+
+        #[cfg(not(target_os = "linux"))]
+        let expected = [SoftmaxKernel {
+            name: "softmax_host",
+            backend: SoftmaxBackend::HostFallback,
+        }];
+
+        assert_eq!(supported_softmax_kernels(), expected);
+    }
+
+    /// Verifies that the cutile dispatch heuristic only accepts flattened widths within the current supported bound.
+    ///
+    /// This catches regressions where Linux would try to launch the tile kernel for sizes outside the planned safety envelope.
+    #[test]
+    fn cutile_support_heuristic_respects_width_boundaries() {
+        assert!(supports_cutile_softmax(1));
+        assert!(supports_cutile_softmax(8));
+        assert!(supports_cutile_softmax(CUTILE_SOFTMAX_MAX_WIDTH));
+        assert!(!supports_cutile_softmax(0));
+        assert!(!supports_cutile_softmax(7));
+        assert!(!supports_cutile_softmax(CUTILE_SOFTMAX_MAX_WIDTH + 1));
     }
 
     /// Verifies softmax_host output against known reference values for [1, 2, 3].
@@ -203,7 +322,7 @@ mod tests {
         let expected = softmax_host(&data);
         let gpu_input = GpuTensor::from_host(&data, &[4]).unwrap();
         let result = super::softmax(&gpu_input).await.unwrap();
-        assert_eq!(result.to_host(), expected);
+        approx_slice_eq(&result.to_host(), &expected, 5e-6);
     }
 
     /// Verifies that async GPU softmax preserves the input shape when the
@@ -218,6 +337,37 @@ mod tests {
         let result = super::softmax(&gpu_input).await.unwrap();
 
         assert_eq!(result.shape(), &[2, 2]);
-        assert_eq!(result.to_host(), expected);
+        approx_slice_eq(&result.to_host(), &expected, 5e-6);
+    }
+
+    /// Verifies that the async GPU softmax stays numerically stable for large shifted inputs.
+    ///
+    /// This catches regressions where the cutile path would skip max-subtraction and diverge from the host contract.
+    #[tokio::test]
+    async fn gpu_softmax_is_stable_for_large_inputs() {
+        let data = vec![1000.0, 1001.0, 1002.0, 1003.0];
+        let expected = softmax_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[4]).unwrap();
+
+        let result = super::softmax(&gpu_input).await.unwrap();
+
+        approx_slice_eq(&result.to_host(), &expected, 5e-5);
+    }
+
+    /// Verifies that Linux falls back to the host bridge when the flattened width exceeds the current cutile softmax limit.
+    ///
+    /// This catches regressions where oversized rows would try to launch an unsupported tile shape instead of preserving correctness.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gpu_softmax_falls_back_for_large_rows() {
+        let width = CUTILE_SOFTMAX_MAX_WIDTH + 1;
+        let data = vec![0.25; width];
+        let gpu_input = GpuTensor::from_host(&data, &[width]).unwrap();
+
+        assert_eq!(active_backend(&gpu_input), SoftmaxBackend::HostFallback);
+
+        let result = super::softmax(&gpu_input).await.unwrap();
+
+        approx_slice_eq(&result.to_host(), &softmax_host(&data), 5e-6);
     }
 }

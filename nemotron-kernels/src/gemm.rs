@@ -6,6 +6,13 @@ pub const SPEC: KernelStub = KernelStub {
     summary: "Matrix multiply kernels adapted from cutile-rs examples.",
 };
 
+#[cfg(any(target_os = "linux", test))]
+const CUTILE_TILE_M: usize = 16;
+#[cfg(any(target_os = "linux", test))]
+const CUTILE_TILE_N: usize = 16;
+#[cfg(any(target_os = "linux", test))]
+const CUTILE_TILE_K: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GemmBackend {
     HostFallback,
@@ -30,19 +37,41 @@ impl GemmShape {
         Self { m, k, n }
     }
 
-    pub const fn lhs_len(self) -> usize {
-        self.m * self.k
+    pub const fn checked_lhs_len(self) -> Option<usize> {
+        self.m.checked_mul(self.k)
     }
 
-    pub const fn rhs_len(self) -> usize {
-        self.k * self.n
+    pub const fn checked_rhs_len(self) -> Option<usize> {
+        self.k.checked_mul(self.n)
     }
 
-    pub const fn output_len(self) -> usize {
-        self.m * self.n
+    pub const fn checked_output_len(self) -> Option<usize> {
+        self.m.checked_mul(self.n)
+    }
+
+    pub fn lhs_len(self) -> usize {
+        self.checked_lhs_len()
+            .expect("GemmShape::lhs_len overflowed usize")
+    }
+
+    pub fn rhs_len(self) -> usize {
+        self.checked_rhs_len()
+            .expect("GemmShape::rhs_len overflowed usize")
+    }
+
+    pub fn output_len(self) -> usize {
+        self.checked_output_len()
+            .expect("GemmShape::output_len overflowed usize")
     }
 }
 
+#[cfg(target_os = "linux")]
+pub const GEMM: GemmKernel = GemmKernel {
+    name: "gemm",
+    backend: GemmBackend::Cutile,
+};
+
+#[cfg(not(target_os = "linux"))]
 pub const GEMM: GemmKernel = GemmKernel {
     name: "gemm_host",
     backend: GemmBackend::HostFallback,
@@ -53,7 +82,8 @@ pub fn supported_gemm_kernels() -> [GemmKernel; 1] {
 }
 
 pub fn gemm_host(lhs: &[f32], rhs: &[f32], shape: GemmShape) -> Result<Vec<f32>, GemmError> {
-    let mut output = vec![0.0; shape.output_len()];
+    let output_len = checked_shape_lengths(shape)?.2;
+    let mut output = vec![0.0; output_len];
     gemm_into_host(lhs, rhs, shape, &mut output)?;
     Ok(output)
 }
@@ -87,30 +117,28 @@ fn validate_shape(
     shape: GemmShape,
     output: &mut [f32],
 ) -> Result<(), GemmError> {
-    if shape.m == 0 || shape.k == 0 || shape.n == 0 {
-        return Err(GemmError::InvalidShape(shape));
-    }
+    let (lhs_len, rhs_len, output_len) = checked_shape_lengths(shape)?;
 
-    if lhs.len() != shape.lhs_len() {
+    if lhs.len() != lhs_len {
         return Err(GemmError::LengthMismatch {
             argument: "lhs",
-            expected: shape.lhs_len(),
+            expected: lhs_len,
             actual: lhs.len(),
         });
     }
 
-    if rhs.len() != shape.rhs_len() {
+    if rhs.len() != rhs_len {
         return Err(GemmError::LengthMismatch {
             argument: "rhs",
-            expected: shape.rhs_len(),
+            expected: rhs_len,
             actual: rhs.len(),
         });
     }
 
-    if output.len() != shape.output_len() {
+    if output.len() != output_len {
         return Err(GemmError::LengthMismatch {
             argument: "output",
-            expected: shape.output_len(),
+            expected: output_len,
             actual: output.len(),
         });
     }
@@ -123,22 +151,20 @@ fn validate_tensor_lengths(
     rhs: &GpuTensor,
     shape: GemmShape,
 ) -> Result<(), GemmError> {
-    if shape.m == 0 || shape.k == 0 || shape.n == 0 {
-        return Err(GemmError::InvalidShape(shape));
-    }
+    let (lhs_len, rhs_len, _) = checked_shape_lengths(shape)?;
 
-    if lhs.numel() != shape.lhs_len() {
+    if lhs.numel() != lhs_len {
         return Err(GemmError::LengthMismatch {
             argument: "lhs",
-            expected: shape.lhs_len(),
+            expected: lhs_len,
             actual: lhs.numel(),
         });
     }
 
-    if rhs.numel() != shape.rhs_len() {
+    if rhs.numel() != rhs_len {
         return Err(GemmError::LengthMismatch {
             argument: "rhs",
-            expected: shape.rhs_len(),
+            expected: rhs_len,
             actual: rhs.numel(),
         });
     }
@@ -163,23 +189,152 @@ impl From<TensorError> for GemmError {
     }
 }
 
+fn checked_shape_lengths(shape: GemmShape) -> Result<(usize, usize, usize), GemmError> {
+    if shape.m == 0 || shape.k == 0 || shape.n == 0 {
+        return Err(GemmError::InvalidShape(shape));
+    }
+
+    let lhs_len = shape
+        .checked_lhs_len()
+        .ok_or(GemmError::InvalidShape(shape))?;
+    let rhs_len = shape
+        .checked_rhs_len()
+        .ok_or(GemmError::InvalidShape(shape))?;
+    let output_len = shape
+        .checked_output_len()
+        .ok_or(GemmError::InvalidShape(shape))?;
+
+    Ok((lhs_len, rhs_len, output_len))
+}
+
+#[cfg(target_os = "linux")]
+mod cutile_impl {
+    use super::{GemmError, GemmShape, CUTILE_TILE_K, CUTILE_TILE_M, CUTILE_TILE_N};
+    use crate::tensor::GpuTensor;
+    use cutile::tensor::Unpartition;
+    use cutile::tile_kernel::{
+        zip, DeviceOperation, IntoDeviceOperation, IntoDeviceOperationPartition, TileKernel,
+        Unzippable3, Zippable,
+    };
+
+    #[cutile::module]
+    mod cutile_gemm_kernel {
+        use cutile::core::*;
+
+        #[cutile::entry()]
+        fn gemm<const BM: i32, const BN: i32, const BK: i32, const K: i32>(
+            output: &mut Tensor<f32, { [BM, BN] }>,
+            lhs: &Tensor<f32, { [-1, K] }>,
+            rhs: &Tensor<f32, { [K, -1] }>,
+        ) {
+            let lhs_tiles = lhs.partition(const_shape![BM, BK]);
+            let rhs_tiles = rhs.partition(const_shape![BK, BN]);
+            let tile_block: (i32, i32, i32) = get_tile_block_id();
+            let mut tile_output = output.load();
+
+            for depth in 0i32..(K / BK) {
+                let lhs_tile = lhs_tiles.load([tile_block.0, depth]);
+                let rhs_tile = rhs_tiles.load([depth, tile_block.1]);
+                tile_output = mma(lhs_tile, rhs_tile, tile_output);
+            }
+
+            output.store(tile_output);
+        }
+    }
+
+    use cutile_gemm_kernel::gemm_apply;
+
+    pub(super) fn supports_shape(shape: GemmShape) -> bool {
+        shape.m <= i32::MAX as usize
+            && shape.k <= i32::MAX as usize
+            && shape.n <= i32::MAX as usize
+            && shape.m % CUTILE_TILE_M == 0
+            && shape.k % CUTILE_TILE_K == 0
+            && shape.n % CUTILE_TILE_N == 0
+    }
+
+    fn device_error(prefix: &str, error: impl std::fmt::Debug) -> GemmError {
+        GemmError::DeviceError(format!("{prefix}: {error:?}"))
+    }
+
+    pub(super) async fn gemm(
+        lhs: &GpuTensor,
+        rhs: &GpuTensor,
+        shape: GemmShape,
+    ) -> Result<GpuTensor, GemmError> {
+        let output = cutile::api::zeros::<2, f32>([shape.m, shape.n]);
+        let generics = vec![
+            CUTILE_TILE_M.to_string(),
+            CUTILE_TILE_N.to_string(),
+            CUTILE_TILE_K.to_string(),
+            shape.k.to_string(),
+        ];
+        let args = zip!(
+            output.partition([CUTILE_TILE_M as i32, CUTILE_TILE_N as i32]),
+            lhs.cutile_tensor_for_shape(&[shape.m, shape.k])
+                .await?
+                .device_operation(),
+            rhs.cutile_tensor_for_shape(&[shape.k, shape.n])
+                .await?
+                .device_operation()
+        );
+        let (output, _lhs, _rhs) = args.apply(gemm_apply).generics(generics).unzip();
+        let output = output
+            .unpartition()
+            .await
+            .map_err(|error| device_error("cutile GEMM unpartition failed", error))?;
+        GpuTensor::from_cutile_tensor(output, &[shape.m, shape.n]).map_err(Into::into)
+    }
+}
+
+fn backend_for_shape(_shape: GemmShape) -> GemmBackend {
+    #[cfg(target_os = "linux")]
+    {
+        if cutile_impl::supports_shape(_shape) {
+            return GemmBackend::Cutile;
+        }
+    }
+
+    GemmBackend::HostFallback
+}
+
+async fn gemm_via_host_bridge(
+    lhs: &GpuTensor,
+    rhs: &GpuTensor,
+    shape: GemmShape,
+) -> Result<GpuTensor, GemmError> {
+    let lhs_data = lhs.to_host_async().await?;
+    let rhs_data = rhs.to_host_async().await?;
+    let result = gemm_host(&lhs_data, &rhs_data, shape)?;
+    Ok(GpuTensor::from_host_async(&result, &[shape.m, shape.n]).await?)
+}
+
 // ---------------------------------------------------------------------------
 // Async GPU API
 // ---------------------------------------------------------------------------
 
 /// Async GPU matrix multiplication. On Linux+CUDA dispatches to a cutile
-/// tile kernel; elsewhere delegates to the host fallback.
+/// tile kernel for aligned shapes; elsewhere delegates to the host fallback.
 pub async fn gemm(
     lhs: &GpuTensor,
     rhs: &GpuTensor,
     shape: GemmShape,
 ) -> Result<GpuTensor, GemmError> {
     validate_tensor_lengths(lhs, rhs, shape)?;
-    let lhs_data = lhs.to_host_async().await?;
-    let rhs_data = rhs.to_host_async().await?;
-    let result = gemm_host(&lhs_data, &rhs_data, shape)?;
-    let output_shape = [shape.m, shape.n];
-    Ok(GpuTensor::from_host_async(&result, &output_shape).await?)
+
+    match backend_for_shape(shape) {
+        GemmBackend::Cutile => {
+            #[cfg(target_os = "linux")]
+            {
+                cutile_impl::gemm(lhs, rhs, shape).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                unreachable!("non-Linux platforms never select the cutile GEMM backend")
+            }
+        }
+        GemmBackend::HostFallback => gemm_via_host_bridge(lhs, rhs, shape).await,
+    }
 }
 
 /// Async GPU matrix multiplication writing into an existing tensor.
@@ -190,21 +345,20 @@ pub async fn gemm_into(
     output: &mut GpuTensor,
 ) -> Result<(), GemmError> {
     validate_tensor_lengths(lhs, rhs, shape)?;
+    let output_len = checked_shape_lengths(shape)?.2;
 
-    if output.numel() != shape.output_len() {
+    if output.numel() != output_len {
         return Err(GemmError::LengthMismatch {
             argument: "output",
-            expected: shape.output_len(),
+            expected: output_len,
             actual: output.numel(),
         });
     }
 
-    let lhs_data = lhs.to_host_async().await?;
-    let rhs_data = rhs.to_host_async().await?;
     let output_shape = output.shape().to_vec();
-    let mut host_output = vec![0.0; output.numel()];
-    gemm_into_host(&lhs_data, &rhs_data, shape, &mut host_output)?;
-    *output = GpuTensor::from_host_async(&host_output, &output_shape).await?;
+    let mut result = gemm(lhs, rhs, shape).await?;
+    result.reshape(&output_shape)?;
+    *output = result;
     Ok(())
 }
 
@@ -212,29 +366,60 @@ pub async fn gemm_into(
 mod tests {
     use super::*;
 
-    fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
+    fn approx_eq_slice_with_tolerance(lhs: &[f32], rhs: &[f32], tolerance: f32) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
         for (index, (left, right)) in lhs.iter().zip(rhs.iter()).enumerate() {
             let diff = (left - right).abs();
             assert!(
-                diff <= 1e-6,
+                diff <= tolerance,
                 "index {index}: left={left:?}, right={right:?}, diff={diff:?}"
             );
         }
     }
 
-    /// Verifies that the GEMM kernel reports HostFallback as its backend.
-    ///
-    /// This catches accidental backend tag changes before GPU kernels exist.
+    fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
+        approx_eq_slice_with_tolerance(lhs, rhs, 1e-6);
+    }
+
+    /// Verifies that GEMM advertises the active platform backend while keeping the
+    /// public registry shape stable. This catches accidental backend metadata
+    /// regressions when the Linux cutile path is enabled.
     #[test]
-    fn reports_host_fallback_backend_for_now() {
-        assert_eq!(
-            supported_gemm_kernels(),
-            [GemmKernel {
-                name: "gemm_host",
-                backend: GemmBackend::HostFallback,
-            }]
-        );
+    fn reports_platform_gemm_backend() {
+        #[cfg(target_os = "linux")]
+        let expected = [GemmKernel {
+            name: "gemm",
+            backend: GemmBackend::Cutile,
+        }];
+
+        #[cfg(not(target_os = "linux"))]
+        let expected = [GemmKernel {
+            name: "gemm_host",
+            backend: GemmBackend::HostFallback,
+        }];
+
+        assert_eq!(supported_gemm_kernels(), expected);
+    }
+
+    /// Verifies that GEMM selects the cutile backend only when the matrix shape
+    /// is tile-aligned on Linux. This catches accidental dispatch of unsupported
+    /// shapes into the device kernel.
+    #[test]
+    fn selects_backend_from_shape_constraints() {
+        let aligned = GemmShape::new(CUTILE_TILE_M * 2, CUTILE_TILE_K * 2, CUTILE_TILE_N * 2);
+        let unaligned = GemmShape::new(CUTILE_TILE_M + 1, CUTILE_TILE_K, CUTILE_TILE_N);
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(backend_for_shape(aligned), GemmBackend::Cutile);
+            assert_eq!(backend_for_shape(unaligned), GemmBackend::HostFallback);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(backend_for_shape(aligned), GemmBackend::HostFallback);
+            assert_eq!(backend_for_shape(unaligned), GemmBackend::HostFallback);
+        }
     }
 
     /// Verifies 2×2 matrix multiplication against hand-computed results.
@@ -308,6 +493,17 @@ mod tests {
         assert_eq!(error, GemmError::InvalidShape(GemmShape::new(0, 1, 1)));
     }
 
+    /// Verifies that overflowing GEMM dimensions are rejected as invalid shapes
+    /// instead of wrapping in release builds. This catches integer-overflow
+    /// regressions in length validation before buffers are trusted.
+    #[test]
+    fn rejects_overflowing_shape_lengths() {
+        let shape = GemmShape::new(2, usize::MAX, 1);
+        let error = gemm_host(&[1.0], &[1.0], shape).unwrap_err();
+        assert_eq!(error, GemmError::InvalidShape(shape));
+        assert_eq!(shape.checked_lhs_len(), None);
+    }
+
     /// Verifies that a too-short lhs buffer is rejected.
     ///
     /// This catches missing lhs length validation.
@@ -360,8 +556,9 @@ mod tests {
         );
     }
 
-    /// Verifies that the async GPU GEMM wrapper produces the same result as
-    /// the host fallback. This catches regressions in the GPU-to-host bridging.
+    /// Verifies that async GPU GEMM preserves host parity when an unaligned shape
+    /// forces the wrapper back through the host fallback path. This catches
+    /// regressions in the fallback bridge while real cutile support is partial.
     #[tokio::test]
     async fn gpu_gemm_matches_host_fallback() {
         let lhs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -419,5 +616,43 @@ mod tests {
                 actual: 3,
             }
         );
+    }
+
+    /// Verifies that async GPU GEMM rejects overflowing shape products before it
+    /// trusts tensor lengths. This catches release-build wraparound bugs in the
+    /// cutile and host-fallback dispatch paths.
+    #[tokio::test]
+    async fn gpu_gemm_rejects_overflowing_shape_lengths() {
+        let shape = GemmShape::new(2, usize::MAX, 1);
+        let gpu_lhs = GpuTensor::from_host(&[1.0], &[1]).unwrap();
+        let gpu_rhs = GpuTensor::from_host(&[1.0], &[1]).unwrap();
+
+        let error = super::gemm(&gpu_lhs, &gpu_rhs, shape).await.unwrap_err();
+
+        assert_eq!(error, GemmError::InvalidShape(shape));
+    }
+
+    /// Verifies that the Linux cutile GEMM path matches host GEMM for a
+    /// tile-aligned shape. This catches regressions that would silently route
+    /// aligned matrices back through the old host bridge.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gpu_gemm_uses_cutile_for_aligned_shapes() {
+        let shape = GemmShape::new(CUTILE_TILE_M * 2, CUTILE_TILE_K * 4, CUTILE_TILE_N * 2);
+        assert_eq!(backend_for_shape(shape), GemmBackend::Cutile);
+
+        let lhs = (0..shape.lhs_len())
+            .map(|index| ((index % 11) as f32 - 5.0) * 0.25)
+            .collect::<Vec<_>>();
+        let rhs = (0..shape.rhs_len())
+            .map(|index| ((index % 7) as f32 - 3.0) * 0.5)
+            .collect::<Vec<_>>();
+        let expected = gemm_host(&lhs, &rhs, shape).unwrap();
+        let gpu_lhs = GpuTensor::from_host(&lhs, &[shape.m, shape.k]).unwrap();
+        let gpu_rhs = GpuTensor::from_host(&rhs, &[shape.k, shape.n]).unwrap();
+
+        let result = super::gemm(&gpu_lhs, &gpu_rhs, shape).await.unwrap();
+
+        approx_eq_slice_with_tolerance(&result.to_host(), &expected, 1e-4);
     }
 }

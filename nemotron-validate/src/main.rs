@@ -596,6 +596,7 @@ async fn run_gpu_kernel_validation(reference_dir: &Path) -> Result<ValidationRep
         let expected = flatten_f32(value_at(fixture, "out")?);
         let row_width = last_dim_len(value_at(fixture, "x")?)?;
         let mut actual = Vec::new();
+        let mut failed = false;
         for row in x.chunks_exact(row_width) {
             let gpu_row = GpuTensor::from_host(row, &[row_width]).map_err(|e| format!("{e:?}"))?;
             match softmax(&gpu_row).await {
@@ -606,11 +607,12 @@ async fn run_gpu_kernel_validation(reference_dir: &Path) -> Result<ValidationRep
                         passed: false,
                         detail: Some(format!("{e:?}")),
                     });
+                    failed = true;
                     break;
                 }
             }
         }
-        if actual.len() == expected.len() {
+        if !failed {
             results.push(compare_f32("gpu/softmax", &actual, &expected, 5e-4));
         }
     }

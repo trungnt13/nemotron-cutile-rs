@@ -18,7 +18,9 @@ use std::time::Instant;
 
 const BENCHMARK_ITERATIONS: usize = 25;
 const E2E_TOLERANCE: f32 = 1e-5;
-const GPU_WRAPPER_NOTE: &str = "GPU wrapper paths currently delegate to host kernels, so these timings measure transfer/wrapper overhead plus parity rather than real GPU compute speed.";
+const GEMM_ALIGNED_DIM: usize = 64;
+const GPU_WRAPPER_NOTE: &str = "Linux now runs real cutile device compute for RMSNorm, softmax on power-of-two flattened widths up to 4096, and GEMM when shapes are aligned to its 16x16x8 tile requirements. Remaining GPU wrapper paths still delegate to host kernels, and unsupported/non-Linux cases continue to use the host bridge.";
+const GEMM_BENCHMARK_NOTE: &str = "benchmark/gemm uses bundled fixtures, while benchmark/gemm-aligned exercises a synthetic 64x64x64 GEMM that can hit the real cutile kernel on Linux.";
 const MODEL_BENCHMARK_NOTE: &str = "Model-level benchmark uses the bundled synthetic e2e runtime to compare forward_tokens against forward_tokens_gpu.";
 
 #[derive(Clone, Debug)]
@@ -54,6 +56,7 @@ pub(crate) async fn run_benchmark_comparison(
             BENCHMARK_ITERATIONS,
         )
         .await?,
+        benchmark_gemm_aligned(BENCHMARK_ITERATIONS).await?,
         benchmark_rms_norm(
             kernel_fixtures
                 .get("rms_norm")
@@ -87,6 +90,7 @@ pub(crate) async fn run_benchmark_comparison(
         results,
         notes: vec![
             GPU_WRAPPER_NOTE.to_string(),
+            GEMM_BENCHMARK_NOTE.to_string(),
             MODEL_BENCHMARK_NOTE.to_string(),
         ],
     })
@@ -130,6 +134,45 @@ async fn benchmark_gemm(fixture: &Value, iterations: usize) -> Result<BenchmarkR
 
     build_result(
         "benchmark/gemm",
+        host_output,
+        gpu_output,
+        host_avg_ms,
+        gpu_wrapper_avg_ms,
+        DEFAULT_TOLERANCE,
+        iterations,
+    )
+}
+
+async fn benchmark_gemm_aligned(iterations: usize) -> Result<BenchmarkResult, String> {
+    let shape = GemmShape::new(GEMM_ALIGNED_DIM, GEMM_ALIGNED_DIM, GEMM_ALIGNED_DIM);
+    let a = (0..shape.lhs_len())
+        .map(|index| ((index % 17) as f32 - 8.0) * 0.125)
+        .collect::<Vec<_>>();
+    let b = (0..shape.rhs_len())
+        .map(|index| ((index % 13) as f32 - 6.0) * 0.25)
+        .collect::<Vec<_>>();
+
+    let (host_output, host_avg_ms) = measure_sync(iterations, || {
+        gemm_host(&a, &b, shape).map_err(|error| format!("{error:?}"))
+    })?;
+    let (gpu_output, gpu_wrapper_avg_ms) = measure_async(iterations, || {
+        let a = &a;
+        let b = &b;
+        async move {
+            let gpu_a = GpuTensor::from_host(a, &[shape.m, shape.k])
+                .map_err(|error| format!("{error:?}"))?;
+            let gpu_b = GpuTensor::from_host(b, &[shape.k, shape.n])
+                .map_err(|error| format!("{error:?}"))?;
+            let output = gemm(&gpu_a, &gpu_b, shape)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            Ok(output.to_host())
+        }
+    })
+    .await?;
+
+    build_result(
+        "benchmark/gemm-aligned",
         host_output,
         gpu_output,
         host_avg_ms,
@@ -493,7 +536,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Verifies that benchmark comparisons load the bundled fixtures and preserve host-vs-wrapper parity when the current wrapper path delegates back to host kernels. This catches regressions in benchmark fixture loading, timing harness execution, and max-diff reporting.
+    /// Verifies that benchmark comparisons load the bundled fixtures and preserve host-vs-wrapper parity while including the synthetic aligned GEMM benchmark. This catches regressions in benchmark fixture loading, timing harness execution, and GEMM-specific reporting.
     #[tokio::test]
     async fn bundled_benchmark_comparison_runs() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -509,11 +552,9 @@ mod tests {
             "benchmark comparisons should pass: {report:?}"
         );
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("delegate to host kernels")),
-            "expected wrapper note in benchmark report"
+            report.notes.iter().any(|note| note
+                .contains("Linux now runs real cutile device compute for RMSNorm, softmax")),
+            "expected mixed real-compute note in benchmark report"
         );
         assert!(
             report
@@ -526,8 +567,32 @@ mod tests {
             report
                 .results
                 .iter()
+                .any(|result| result.name == "benchmark/gemm-aligned"),
+            "expected aligned gemm benchmark result"
+        );
+        assert!(
+            report
+                .results
+                .iter()
                 .any(|result| result.name.starts_with("benchmark/model/")),
             "expected model benchmark result"
         );
+    }
+
+    /// Verifies that the synthetic aligned GEMM benchmark runs without fixture
+    /// files and reports parity against the host reference. This catches
+    /// regressions in the cutile-ready GEMM benchmark hook itself.
+    #[tokio::test]
+    async fn aligned_gemm_benchmark_runs_without_fixtures() {
+        let result = benchmark_gemm_aligned(1)
+            .await
+            .expect("aligned GEMM benchmark should run");
+
+        assert_eq!(result.name, "benchmark/gemm-aligned");
+        assert!(
+            result.passed,
+            "aligned GEMM benchmark should preserve parity"
+        );
+        assert_eq!(result.iterations, 1);
     }
 }
