@@ -5,7 +5,7 @@
 Rust inference framework for **Nemotron-3-Nano-30B-A3B** — a 52-layer hybrid model with 23 Mamba-2 mixers, 23 Mixture-of-Experts (MoE) layers, and 6 Grouped-Query Attention (GQA) blocks. The goal is output parity with the vLLM reference implementation (`stelterlab/NVIDIA-Nemotron-3-Nano-30B-A3B-AWQ`), targeting INT4 (AWQ) quantization on an RTX 3090.
 
 Key design decisions:
-- **Host-fallback first** — all 10 kernels have pure-Rust CPU implementations. Linux now has real `cutile-rs` compute for RMSNorm, softmax on power-of-two widths, and aligned GEMM, while the remaining GPU paths still use tensor/device scaffolding plus async wrapper fallbacks.
+- **Host-fallback first** — all 10 kernels have pure-Rust CPU implementations. Linux now has real `cutile-rs` compute for RMSNorm, softmax on power-of-two widths, aligned GEMM, and affine INT4 dequantize on power-of-two lengths, while the remaining GPU paths still use tensor/device scaffolding plus async wrapper fallbacks.
 - **Kernel parity before model parity** — validate individual kernel outputs against vLLM fixtures before attempting full-model inference.
 - **MoE uses sigmoid routing with bias correction**, not softmax — verified from the reference, not assumed from naming.
 
@@ -22,7 +22,7 @@ cargo run -p nemotron-cli -- "Hello, world!"  # generation preview
 Toolchain requirements:
 - Rust edition 2021, MSRV **1.85**
 - Workspace resolver `"2"`
-- `cutile` is a git dependency (`NVlabs/cutile-rs`) — used for Linux-only tensor/device scaffolding plus real device compute in RMSNorm, softmax on power-of-two widths, and aligned GEMM; unsupported kernels still delegate to host
+- `cutile` is a git dependency (`NVlabs/cutile-rs`) — used for Linux-only tensor/device scaffolding plus real device compute in RMSNorm, softmax on power-of-two widths, aligned GEMM, and affine INT4 dequantize on power-of-two lengths; unsupported kernels still delegate to host
 
 Prefer workspace-level dependencies in the root `Cargo.toml` to keep versions consistent across crates. Ask before adding new workspace dependencies.
 
@@ -117,7 +117,7 @@ When adding a new kernel or layer:
 | GPU wrapper validation | ✅ 7/7 pass | Covers every bundled kernel fixture through async GPU wrappers |
 | Workspace tests | ✅ ~204 passing locally and on Linux/RTX 3090 | Includes crate tests + integration tests; 1 doc test remains ignored |
 | GPU scaffolding (cutile) | ✅ Implemented and validated on Linux | `GpuTensor`, `GpuDevice`, async kernel/nn/model wrapper paths compile and run on Linux/macOS |
-| Real cutile compute kernels | 🟡 Wave 1 partially landed | RMSNorm, softmax on power-of-two widths, and tile-aligned GEMM now execute on device on Linux; the remaining kernels still use the host bridge |
+| Real cutile compute kernels | 🟡 Wave 1 partially landed | RMSNorm, softmax on power-of-two widths, tile-aligned GEMM, and affine INT4 dequantize on power-of-two lengths now execute on device on Linux; the remaining kernels still use the host bridge |
 | Benchmark mode | ✅ Local + Linux comparison mode | `nemotron-validate benchmark ...` reports host vs GPU timing/parity, including synthetic aligned GEMM coverage |
 | Full checkpoint loading | ⏳ Pending | Needs real AWQ model weights |
 | Layer-level validation | 🚫 Blocked | vLLM internals incompatible with fixture extraction |

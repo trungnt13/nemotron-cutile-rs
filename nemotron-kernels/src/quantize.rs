@@ -30,6 +30,13 @@ impl Int4QuantizationParams {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub const INT4_AFFINE: QuantizeKernel = QuantizeKernel {
+    name: "int4_affine",
+    backend: QuantizeBackend::Cutile,
+};
+
+#[cfg(not(target_os = "linux"))]
 pub const INT4_AFFINE: QuantizeKernel = QuantizeKernel {
     name: "int4_affine",
     backend: QuantizeBackend::HostFallback,
@@ -196,6 +203,11 @@ fn dequantize_scalar(code: u8, params: Int4QuantizationParams) -> f32 {
     (f32::from(code) - f32::from(params.zero_point)) * params.scale
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn supports_cutile_dequantize(value_count: usize) -> bool {
+    value_count > 0 && value_count.is_power_of_two() && i32::try_from(value_count).is_ok()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuantizeError {
     InvalidParams(Int4QuantizationParams),
@@ -222,8 +234,7 @@ impl From<TensorError> for QuantizeError {
 // Async GPU API
 // ---------------------------------------------------------------------------
 
-/// Async GPU INT4 dequantization.
-pub async fn dequantize_int4(
+async fn dequantize_int4_host_bridge(
     packed: &[u8],
     value_count: usize,
     params: Int4QuantizationParams,
@@ -232,6 +243,109 @@ pub async fn dequantize_int4(
     GpuTensor::from_host_async(&result, &[value_count])
         .await
         .map_err(|e| QuantizeError::DeviceError(e.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+mod cutile_impl {
+    use super::{
+        supports_cutile_dequantize, validate_int4_params, Int4QuantizationParams, QuantizeError,
+    };
+    use crate::tensor::GpuTensor;
+    use std::sync::Arc;
+
+    use cutile::tile_kernel::{IntoDeviceOperation, IntoDeviceOperationPartition};
+
+    #[cutile::module]
+    mod cutile_quantize_kernel {
+        use cutile::core::*;
+
+        #[cutile::entry()]
+        fn dequantize<const S: [i32; 1]>(
+            codes: &Tensor<f32, { [-1] }>,
+            output: &mut Tensor<f32, S>,
+            scale: f32,
+            zero_point: f32,
+        ) {
+            let output_shape = output.shape();
+            let codes_tile: Tile<f32, S> = load_tile_like_1d(codes, output);
+            let zero_point: Tile<f32, S> = zero_point.broadcast(output_shape);
+            let scale: Tile<f32, S> = scale.broadcast(output_shape);
+            output.store((codes_tile - zero_point) * scale);
+        }
+    }
+
+    fn device_error(prefix: &str, error: impl std::fmt::Debug) -> QuantizeError {
+        QuantizeError::DeviceError(format!("{prefix}: {error:?}"))
+    }
+
+    pub(super) async fn dequantize(
+        packed: &[u8],
+        value_count: usize,
+        params: Int4QuantizationParams,
+    ) -> Result<GpuTensor, QuantizeError> {
+        validate_int4_params(params)?;
+
+        if !supports_cutile_dequantize(value_count) {
+            return Err(QuantizeError::DeviceError(format!(
+                "cutile INT4 dequantize does not support value_count={value_count}"
+            )));
+        }
+
+        let unpacked = super::unpack_int4_host(packed, value_count)?;
+        let codes = Arc::new(unpacked.into_iter().map(f32::from).collect::<Vec<f32>>());
+        let codes_tensor = Arc::new(
+            cutile::api::copy_host_vec_to_device(&codes)
+                .await
+                .map_err(|error| device_error("cutile INT4 code upload failed", error))?
+                .reshape_dyn(&[value_count]),
+        );
+        let partition_size = i32::try_from(value_count.min(128)).map_err(|_| {
+            QuantizeError::DeviceError("cutile INT4 partition size overflowed i32".to_string())
+        })?;
+        let output = cutile::api::zeros::<1, f32>([value_count]).partition([partition_size]);
+        let (_codes, output, _scale, _zero_point) = cutile_quantize_kernel::dequantize_async(
+            codes_tensor.device_operation(),
+            output,
+            params.scale.device_operation(),
+            f32::from(params.zero_point).device_operation(),
+        )
+        .await
+        .map_err(|error| device_error("cutile INT4 dequantize launch failed", error))?;
+        GpuTensor::from_cutile_tensor(output.unpartition(), &[value_count]).map_err(Into::into)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn active_backend(value_count: usize) -> QuantizeBackend {
+    if supports_cutile_dequantize(value_count) {
+        QuantizeBackend::Cutile
+    } else {
+        QuantizeBackend::HostFallback
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn active_backend(_value_count: usize) -> QuantizeBackend {
+    QuantizeBackend::HostFallback
+}
+
+/// Async GPU INT4 dequantization.
+pub async fn dequantize_int4(
+    packed: &[u8],
+    value_count: usize,
+    params: Int4QuantizationParams,
+) -> Result<GpuTensor, QuantizeError> {
+    match active_backend(value_count) {
+        #[cfg(target_os = "linux")]
+        QuantizeBackend::Cutile => cutile_impl::dequantize(packed, value_count, params).await,
+        QuantizeBackend::HostFallback => {
+            dequantize_int4_host_bridge(packed, value_count, params).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        QuantizeBackend::Cutile => {
+            unreachable!("cutile backend is unavailable on this platform")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,18 +371,38 @@ mod tests {
         }
     }
 
-    /// Verifies that the quantize kernel reports HostFallback as its backend.
+    /// Verifies that the quantize kernel registry reports the platform's primary backend.
     ///
-    /// This catches accidental backend tag changes before GPU kernels exist.
+    /// This catches accidental backend tag changes as Linux gains cutile dequantize compute while other platforms keep host fallback.
     #[test]
-    fn reports_host_fallback_backend_for_now() {
-        assert_eq!(
-            supported_quantize_kernels(),
-            [QuantizeKernel {
-                name: "int4_affine",
-                backend: QuantizeBackend::HostFallback,
-            }]
-        );
+    fn reports_platform_primary_backend() {
+        #[cfg(target_os = "linux")]
+        let expected = [QuantizeKernel {
+            name: "int4_affine",
+            backend: QuantizeBackend::Cutile,
+        }];
+
+        #[cfg(not(target_os = "linux"))]
+        let expected = [QuantizeKernel {
+            name: "int4_affine",
+            backend: QuantizeBackend::HostFallback,
+        }];
+
+        assert_eq!(supported_quantize_kernels(), expected);
+    }
+
+    /// Verifies that the cutile dequantize heuristic only accepts positive power-of-two value counts within the current i32 launch bound.
+    ///
+    /// This catches regressions where Linux dispatch would claim support for empty, non-power-of-two, or overflow-sized lengths that are outside the current cutile safety envelope.
+    #[test]
+    fn cutile_support_heuristic_respects_launch_bounds() {
+        assert!(supports_cutile_dequantize(1));
+        assert!(supports_cutile_dequantize(8));
+        assert!(supports_cutile_dequantize(128));
+        assert!(!supports_cutile_dequantize(0));
+        assert!(!supports_cutile_dequantize(7));
+        assert!(!supports_cutile_dequantize(129));
+        assert!(!supports_cutile_dequantize(i32::MAX as usize + 1));
     }
 
     /// Verifies INT4 pack/unpack round-trips correctly with an even value count.
@@ -447,11 +581,30 @@ mod tests {
         }
     }
 
-    /// Verifies that the async GPU INT4 dequantize wrapper matches the host fallback and preserves a 1D output shape when the packed input has an odd element count. This catches regressions in nibble unpacking, result upload, and shape reconstruction for trailing padded nibbles.
+    /// Verifies that the async GPU INT4 dequantize wrapper matches the host fallback and preserves a 1D output shape when the packed input has an odd element count. This catches regressions in nibble unpacking, host-fallback dispatch, result upload, and shape reconstruction for trailing padded nibbles.
     #[tokio::test]
     async fn gpu_dequantize_int4_matches_host_fallback_and_preserves_shape() {
         let packed = vec![0x76, 0x98, 0x0A];
         let value_count = 5;
+        let params = Int4QuantizationParams::new(0.5, 8);
+        let expected = dequantize_int4_host(&packed, value_count, params).unwrap();
+
+        let result = super::dequantize_int4(&packed, value_count, params)
+            .await
+            .unwrap();
+
+        assert_eq!(result.shape(), &[value_count]);
+        approx_eq_slice(&result.to_host(), &expected);
+    }
+
+    /// Verifies that the Linux cutile INT4 dequantize path matches the host fallback for a supported power-of-two value count.
+    ///
+    /// This catches regressions where the real device affine transform diverges from the generic host dequantization formula.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gpu_dequantize_int4_cutile_matches_host_for_power_of_two_length() {
+        let packed = vec![0x76, 0x98];
+        let value_count = 4;
         let params = Int4QuantizationParams::new(0.5, 8);
         let expected = dequantize_int4_host(&packed, value_count, params).unwrap();
 
