@@ -547,4 +547,107 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the async GPU selective scan matches the host fallback and preserves tensor shapes when initial state is provided. This catches regressions in wrapper D2H/H2D transfers, optional-state handling, and output shape reconstruction.
+    #[tokio::test]
+    async fn gpu_selective_scan_matches_host_fallback_and_preserves_shapes() {
+        let shape = SelectiveScanShape::new(2, 1, 2);
+        let input = vec![1.0, 2.0];
+        let delta_t = vec![1.0, 1.0];
+        let a = vec![0.0, 0.0];
+        let b = vec![
+            1.0, 0.5, //
+            1.0, 0.5, //
+        ];
+        let c = vec![
+            0.25, 1.0, //
+            0.25, 1.0, //
+        ];
+        let d = vec![0.1];
+        let initial_state = vec![0.5, 1.0];
+        let expected = selective_scan_host(
+            SelectiveScanParams {
+                input: &input,
+                delta_t: &delta_t,
+                a: &a,
+                b: &b,
+                c: &c,
+                d: Some(&d),
+                initial_state: Some(&initial_state),
+                delta_bias: 0.0,
+                apply_softplus_to_dt: false,
+            },
+            shape,
+        )
+        .unwrap();
+        let gpu_input = GpuTensor::from_host(&input, &[2, 1]).unwrap();
+        let gpu_delta_t = GpuTensor::from_host(&delta_t, &[2, 1]).unwrap();
+        let gpu_a = GpuTensor::from_host(&a, &[1, 2]).unwrap();
+        let gpu_b = GpuTensor::from_host(&b, &[2, 1, 2]).unwrap();
+        let gpu_c = GpuTensor::from_host(&c, &[2, 1, 2]).unwrap();
+        let gpu_d = GpuTensor::from_host(&d, &[1]).unwrap();
+        let gpu_initial_state = GpuTensor::from_host(&initial_state, &[1, 2]).unwrap();
+
+        let result = super::selective_scan(
+            GpuSelectiveScanParams {
+                input: &gpu_input,
+                delta_t: &gpu_delta_t,
+                a: &gpu_a,
+                b: &gpu_b,
+                c: &gpu_c,
+                d: Some(&gpu_d),
+                initial_state: Some(&gpu_initial_state),
+                delta_bias: 0.0,
+                apply_softplus_to_dt: false,
+            },
+            shape,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.output.shape(), &[2, 1]);
+        assert_eq!(result.final_state.shape(), &[1, 2]);
+        approx_eq_slice(&result.output.to_host(), &expected.values);
+        approx_eq_slice(&result.final_state.to_host(), &expected.final_state);
+    }
+
+    /// Verifies that the async GPU selective scan propagates host validation errors when delta_t is negative without softplus. This catches regressions where the wrapper might mask invalid dynamics instead of returning the host-kernel error.
+    #[tokio::test]
+    async fn gpu_selective_scan_propagates_invalid_delta_t() {
+        let shape = SelectiveScanShape::new(1, 1, 1);
+        let gpu_input = GpuTensor::from_host(&[1.0], &[1, 1]).unwrap();
+        let gpu_delta_t = GpuTensor::from_host(&[-0.5], &[1, 1]).unwrap();
+        let gpu_a = GpuTensor::from_host(&[0.0], &[1, 1]).unwrap();
+        let gpu_b = GpuTensor::from_host(&[1.0], &[1, 1, 1]).unwrap();
+        let gpu_c = GpuTensor::from_host(&[1.0], &[1, 1, 1]).unwrap();
+
+        let error = match super::selective_scan(
+            GpuSelectiveScanParams {
+                input: &gpu_input,
+                delta_t: &gpu_delta_t,
+                a: &gpu_a,
+                b: &gpu_b,
+                c: &gpu_c,
+                d: None,
+                initial_state: None,
+                delta_bias: 0.0,
+                apply_softplus_to_dt: false,
+            },
+            shape,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected InvalidDeltaT error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            SsmError::InvalidDeltaT {
+                timestep: 0,
+                channel: 0,
+                value: -0.5,
+            }
+        );
+    }
 }

@@ -372,6 +372,7 @@ mod tests {
         let gpu_weights = GpuTensor::from_host(&weights, &[2, 2]).unwrap();
         let result = super::depthwise_causal_conv1d(&gpu_input, &gpu_weights, shape)
             .await.unwrap();
+        assert_eq!(result.shape(), gpu_input.shape());
         assert_eq!(result.to_host(), expected);
     }
 

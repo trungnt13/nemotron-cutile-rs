@@ -642,6 +642,7 @@ mod tests {
         let result = super::scaled_dot_product_attention(
             &gpu_q, &gpu_k, &gpu_v, shape, options,
         ).await.unwrap();
+        assert_eq!(result.shape(), &[1, 1, 1, 2]);
         assert_eq!(result.to_host(), expected);
     }
 

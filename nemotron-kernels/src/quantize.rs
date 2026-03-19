@@ -444,4 +444,31 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
     }
+
+    /// Verifies that the async GPU INT4 dequantize wrapper matches the host fallback and preserves a 1D output shape when the packed input has an odd element count. This catches regressions in nibble unpacking, result upload, and shape reconstruction for trailing padded nibbles.
+    #[tokio::test]
+    async fn gpu_dequantize_int4_matches_host_fallback_and_preserves_shape() {
+        let packed = vec![0x76, 0x98, 0x0A];
+        let value_count = 5;
+        let params = Int4QuantizationParams::new(0.5, 8);
+        let expected = dequantize_int4_host(&packed, value_count, params).unwrap();
+
+        let result = super::dequantize_int4(&packed, value_count, params).await.unwrap();
+
+        assert_eq!(result.shape(), &[value_count]);
+        approx_eq_slice(&result.to_host(), &expected);
+    }
+
+    /// Verifies that the async GPU INT4 dequantize wrapper propagates invalid quantization parameters before uploading results. This catches regressions where wrapper-side error handling could hide host-contract validation failures.
+    #[tokio::test]
+    async fn gpu_dequantize_int4_rejects_invalid_params() {
+        let error = super::dequantize_int4(&[0x10], 2, Int4QuantizationParams::new(0.0, 8))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            QuantizeError::InvalidParams(Int4QuantizationParams::new(0.0, 8))
+        );
+    }
 }

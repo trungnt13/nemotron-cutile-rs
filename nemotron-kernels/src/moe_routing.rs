@@ -537,4 +537,18 @@ mod tests {
         assert_eq!(result.weights, expected.weights);
     }
 
+    /// Verifies that the async GPU softmax MoE routing wrapper matches the host fallback when routing multiple tokens. This catches regressions in score transfer or top-k softmax normalization on the async wrapper path.
+    #[tokio::test]
+    async fn gpu_moe_route_softmax_matches_host_fallback() {
+        let scores = vec![0.4390189, 1.2967792, 2.4748528, 1.1023278, -1.263859, 0.51365805];
+        let shape = MoeRoutingShape::new(2, 3, 2);
+        let expected = moe_route_softmax_host(&scores, shape).unwrap();
+        let gpu_scores = GpuTensor::from_host(&scores, &[2, 3]).unwrap();
+
+        let result = super::moe_route_softmax(&gpu_scores, shape).await.unwrap();
+
+        assert_eq!(result.indices, expected.indices);
+        approx_eq_slice(&result.weights, &expected.weights);
+    }
+
 }

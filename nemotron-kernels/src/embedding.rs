@@ -379,6 +379,7 @@ mod tests {
         let gpu_table = GpuTensor::from_host(&table, &[3, 2]).unwrap();
         let result = super::embedding_lookup(&gpu_table, token_ids, shape)
             .await.unwrap();
+        assert_eq!(result.shape(), &[3, 2]);
         assert_eq!(result.to_host(), expected);
     }
 
