@@ -2,6 +2,7 @@ use crate::config::{ModelConfig, SpecialTokenIds};
 use crate::tokenizer::{ModelTokenizer, TokenizerError};
 use nemotron_kernels::embedding::{embedding_lookup_host, EmbeddingError, EmbeddingShape};
 use nemotron_kernels::rms_norm::{rms_norm_host, RmsNormError};
+use nemotron_kernels::tensor::GpuTensor;
 use nemotron_nn::{BlockError, HybridCache, LinearError, LinearProjection, NemotronBlock};
 use std::error::Error;
 use std::fmt;
@@ -83,6 +84,7 @@ pub enum ModelForwardError {
     },
     FinalNorm(RmsNormError),
     LmHead(LinearError),
+    DeviceError(String),
 }
 
 impl fmt::Display for ModelTextError {
@@ -133,6 +135,7 @@ impl fmt::Display for ModelForwardError {
             }
             Self::FinalNorm(source) => write!(f, "final norm failed: {source:?}"),
             Self::LmHead(source) => write!(f, "lm head failed: {source}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }
@@ -308,6 +311,84 @@ impl NemotronModel {
 
     pub fn predict_next_token(&self, token_ids: &[u32]) -> Result<u32, ModelForwardError> {
         let output = self.forward_tokens(token_ids)?;
+        let vocab_size = self.config.vocab_size;
+        let last_row = &output.logits[output.logits.len() - vocab_size..];
+        let (index, _) = last_row
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("lm head always produces at least one logit");
+        Ok(index as u32)
+    }
+
+    /// Async GPU forward pass. Transfers data through GpuTensor, delegates to
+    /// block-level `forward_gpu` wrappers. Host-fallback on macOS.
+    pub async fn forward_tokens_gpu(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<ModelForwardOutput, ModelForwardError> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or(ModelForwardError::MissingRuntime)?;
+        let token_ids_usize = token_ids
+            .iter()
+            .copied()
+            .map(|token_id| {
+                usize::try_from(token_id).map_err(|_| ModelForwardError::InvalidTokenId(token_id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Embedding lookup on host, then upload to GPU tensor
+        let hidden_host = embedding_lookup_host(
+            runtime.embeddings.values(),
+            &token_ids_usize,
+            runtime.embeddings.shape(),
+        )
+        .map_err(ModelForwardError::Embedding)?;
+        let seq_len = token_ids_usize.len();
+        let hidden_size = self.config.hidden_size;
+        let mut hidden = GpuTensor::from_host_async(&hidden_host, &[seq_len, hidden_size])
+            .await
+            .map_err(|e| ModelForwardError::DeviceError(e.to_string()))?;
+
+        // Block stack on GPU
+        let mut cache = HybridCache::new(runtime.blocks.len());
+        for (layer_index, block) in runtime.blocks.iter().enumerate() {
+            let layer_cache = cache
+                .layer_mut(layer_index)
+                .expect("layer index is in bounds");
+            hidden = block
+                .forward_gpu(&hidden, seq_len, Some(layer_cache))
+                .await
+                .map_err(|source| ModelForwardError::Block {
+                    layer_index,
+                    source,
+                })?;
+        }
+
+        // Final norm + LM head (transfer back to host for norm, then back)
+        let hidden_host = hidden
+            .to_host_async()
+            .await
+            .map_err(|e| ModelForwardError::DeviceError(e.to_string()))?;
+        let hidden_states = rms_norm_rows(&hidden_host, &runtime.final_norm_weight, hidden_size, 1e-5)
+            .map_err(ModelForwardError::FinalNorm)?;
+        let logits = runtime
+            .lm_head
+            .project(&hidden_states, seq_len)
+            .map_err(ModelForwardError::LmHead)?;
+
+        Ok(ModelForwardOutput {
+            hidden_states,
+            logits,
+        })
+    }
+
+    /// Async GPU predict next token. Delegates to `forward_tokens_gpu`.
+    pub async fn predict_next_token_gpu(&self, token_ids: &[u32]) -> Result<u32, ModelForwardError> {
+        let output = self.forward_tokens_gpu(token_ids).await?;
         let vocab_size = self.config.vocab_size;
         let last_row = &output.logits[output.logits.len() - vocab_size..];
         let (index, _) = last_row

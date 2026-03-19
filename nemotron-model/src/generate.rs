@@ -73,6 +73,48 @@ impl NemotronModel {
             generated_text,
         })
     }
+
+    /// Async GPU generation loop. Uses `predict_next_token_gpu` for each step.
+    pub async fn generate_gpu(
+        &self,
+        request: &GenerationRequest,
+    ) -> Result<GenerationResult, GenerationError> {
+        let prompt_token_ids = self
+            .encode_with_special_tokens(&request.prompt, request.add_special_tokens)
+            .map_err(GenerationError::Text)?;
+        let mut all_token_ids = prompt_token_ids.clone();
+        let mut generated_token_ids = Vec::new();
+        let eos_token = self.special_token_ids().eos;
+
+        for _ in 0..request.max_new_tokens {
+            let next_token = self
+                .predict_next_token_gpu(&all_token_ids)
+                .await
+                .map_err(GenerationError::Forward)?;
+            all_token_ids.push(next_token);
+            generated_token_ids.push(next_token);
+
+            if request.stop_on_eos && Some(next_token) == eos_token {
+                break;
+            }
+        }
+
+        let generated_text = if self.has_tokenizer() {
+            Some(
+                self.decode_with_special_tokens(&generated_token_ids, true)
+                    .map_err(GenerationError::Text)?,
+            )
+        } else {
+            None
+        };
+
+        Ok(GenerationResult {
+            prompt_token_ids,
+            generated_token_ids,
+            all_token_ids,
+            generated_text,
+        })
+    }
 }
 
 pub fn generation_preview(model: &NemotronModel, request: &GenerationRequest) -> String {
