@@ -12,11 +12,21 @@ ARG CMAKE_CUDA_ARCHITECTURES=86
 ARG INSTALL_PYTHON_STACK=1
 ARG INSTALL_LLAMA_CPP=1
 ARG BUILD_WORKSPACE=1
+ARG USERNAME=dev
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     VIRTUAL_ENV=/opt/venv \
-    PATH=/usr/local/cargo/bin:/opt/venv/bin:/usr/local/cuda/bin:${PATH} \
+    CUDA_TOOLKIT_PATH=/usr/local/cuda-13.2 \
+    CUDA_PATH=/usr/local/cuda-13.2 \
+    CUDA_TILE_USE_LLVM_INSTALL_DIR=/usr/lib/llvm-21 \
+    LLVM_SYS_210_PREFIX=/usr/lib/llvm-21 \
+    LLVM_CONFIG_PATH=/usr/lib/llvm-21/bin/llvm-config \
+    MLIR_SYS_210_PREFIX=/usr/lib/llvm-21 \
+    BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/llvm-21/include \
+    PATH=/usr/local/cargo/bin:/opt/venv/bin:/usr/lib/llvm-21/bin:/usr/local/cuda/bin:${PATH} \
     CARGO_TERM_COLOR=always \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -25,13 +35,22 @@ ENV CARGO_HOME=/usr/local/cargo \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     ca-certificates \
-    clang \
-    cmake \
     curl \
+    && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+        | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null \
+    && echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
+        >/etc/apt/sources.list.d/llvm-21.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    clang-21 \
+    cmake \
     git \
-    libclang-dev \
+    libclang-21-dev \
+    libmlir-21-dev \
+    llvm-21 \
+    llvm-21-dev \
+    mlir-21-tools \
     libonig-dev \
     libssl-dev \
     libzstd-dev \
@@ -40,7 +59,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/local/cuda /usr/local/cuda-13.2 \
+    && ln -sf /usr/bin/clang-21 /usr/local/bin/clang \
+    && ln -sf /usr/bin/clang++-21 /usr/local/bin/clang++ \
+    && ln -sf /usr/lib/llvm-21/bin/llvm-config /usr/local/bin/llvm-config
 
 RUN python3 -m venv "${VIRTUAL_ENV}" \
     && "${VIRTUAL_ENV}/bin/pip" install --upgrade pip setuptools wheel uv
@@ -76,6 +101,25 @@ RUN if [[ "${INSTALL_LLAMA_CPP}" == "1" ]]; then \
         && rm -rf /tmp/llama.cpp; \
     fi
 
+RUN group_name="$(getent group "${USER_GID}" | cut -d: -f1 || true)" \
+    && if [[ -z "${group_name}" ]]; then \
+        groupadd --gid "${USER_GID}" "${USERNAME}"; \
+    elif [[ "${group_name}" != "${USERNAME}" ]]; then \
+        groupmod --new-name "${USERNAME}" "${group_name}"; \
+    fi \
+    && user_name="$(getent passwd "${USER_UID}" | cut -d: -f1 || true)" \
+    && if [[ -z "${user_name}" ]]; then \
+        useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --home-dir "/home/${USERNAME}" --shell /bin/bash "${USERNAME}"; \
+    elif [[ "${user_name}" != "${USERNAME}" ]]; then \
+        usermod --login "${USERNAME}" --home "/home/${USERNAME}" --move-home --gid "${USER_GID}" "${user_name}"; \
+    fi \
+    && usermod --uid "${USER_UID}" --gid "${USER_GID}" --shell /bin/bash "${USERNAME}" \
+    && mkdir -p "/home/${USERNAME}" \
+    && usermod -aG sudo "${USERNAME}" \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/"${USERNAME}" \
+    && chmod 0440 /etc/sudoers.d/"${USERNAME}" \
+    && chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}" "${CARGO_HOME}" "${RUSTUP_HOME}" "${VIRTUAL_ENV}"
+
 WORKDIR /workspace
 
 COPY . .
@@ -84,4 +128,6 @@ RUN if [[ "${BUILD_WORKSPACE}" == "1" ]]; then \
         cargo build --workspace; \
     fi
 
-CMD ["bash"]
+USER ${USERNAME}
+
+CMD ["sleep", "infinity"]
