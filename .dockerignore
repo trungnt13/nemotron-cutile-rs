@@ -1,0 +1,7 @@
+.DS_Store
+.git
+.gitignore
+target
+data
+.vscode
+ai-docs
