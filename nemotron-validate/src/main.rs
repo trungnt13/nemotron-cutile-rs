@@ -1,11 +1,12 @@
 mod e2e;
 
-use nemotron_kernels::activations::{relu2_host, silu_host};
+use nemotron_kernels::activations::{relu2, relu2_host, silu, silu_host};
 use nemotron_kernels::conv1d::{depthwise_causal_conv1d_host, Conv1dShape};
-use nemotron_kernels::gemm::{gemm_host, GemmShape};
+use nemotron_kernels::gemm::{gemm, gemm_host, GemmShape};
 use nemotron_kernels::moe_routing::{moe_route_softmax_host, MoeRoutingShape};
-use nemotron_kernels::rms_norm::rms_norm_host;
-use nemotron_kernels::softmax::softmax_host;
+use nemotron_kernels::rms_norm::{rms_norm, rms_norm_host};
+use nemotron_kernels::softmax::{softmax, softmax_host};
+use nemotron_kernels::tensor::GpuTensor;
 use nemotron_model::workspace_summary;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -61,6 +62,36 @@ async fn main() {
         }
         Err(error) => {
             eprintln!("validation error: {error}");
+            std::process::exit(2);
+        }
+    }
+
+    // Run async GPU kernel validation (host-fallback on macOS)
+    match run_gpu_kernel_validation(&kernel_reference_dir).await {
+        Ok(report) => {
+            for result in &report.results {
+                println!(
+                    "{}: {}{}",
+                    result.name,
+                    if result.passed { "PASS" } else { "FAIL" },
+                    result
+                        .detail
+                        .as_ref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default()
+                );
+            }
+            let passed = report.results.iter().filter(|result| result.passed).count();
+            println!(
+                "gpu summary: {passed}/{} gpu validations passed",
+                report.results.len()
+            );
+            if !report.success() {
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("gpu validation error: {error}");
             std::process::exit(2);
         }
     }
@@ -365,6 +396,138 @@ fn reshape_conv_weights(
         ));
     }
     Ok(weights.to_vec())
+}
+
+/// Async GPU kernel validation — runs the same fixtures through async GPU wrappers.
+/// On macOS, this delegates to host fallback; on Linux with CUDA, it runs on GPU.
+async fn run_gpu_kernel_validation(reference_dir: &Path) -> Result<ValidationReport, String> {
+    let fixtures_path = reference_dir.join("fixtures.json");
+    let fixtures: BTreeMap<String, Value> = serde_json::from_slice(
+        &fs::read(&fixtures_path)
+            .map_err(|error| format!("failed to read {}: {error}", fixtures_path.display()))?,
+    )
+    .map_err(|error| format!("failed to parse {}: {error}", fixtures_path.display()))?;
+
+    let mut results = Vec::new();
+
+    // GPU GEMM
+    if let Some(fixture) = fixtures.get("gemm") {
+        let a = flatten_f32(value_at(fixture, "a")?);
+        let b = flatten_f32(value_at(fixture, "b")?);
+        let expected = flatten_f32(value_at(fixture, "out")?);
+        let a_rows = array_len(value_at(fixture, "a")?);
+        let a_cols = array_len(&value_at(fixture, "a")?[0]);
+        let b_cols = array_len(&value_at(fixture, "b")?[0]);
+        let gpu_a = GpuTensor::from_host(&a, &[a_rows, a_cols]).map_err(|e| format!("{e:?}"))?;
+        let gpu_b = GpuTensor::from_host(&b, &[a_cols, b_cols]).map_err(|e| format!("{e:?}"))?;
+        match gemm(&gpu_a, &gpu_b, GemmShape::new(a_rows, a_cols, b_cols)).await {
+            Ok(result) => {
+                let actual = result.to_host();
+                results.push(compare_f32("gpu/gemm", &actual, &expected, DEFAULT_TOLERANCE));
+            }
+            Err(e) => results.push(ValidationResult {
+                name: "gpu/gemm".to_string(),
+                passed: false,
+                detail: Some(format!("{e:?}")),
+            }),
+        }
+    }
+
+    // GPU RMS norm
+    if let Some(fixture) = fixtures.get("rms_norm") {
+        let x = flatten_f32(value_at(fixture, "x")?);
+        let weight = flatten_f32(value_at(fixture, "weight")?);
+        let expected = flatten_f32(value_at(fixture, "out")?);
+        let epsilon = fixture.get("eps").and_then(Value::as_f64).ok_or("missing rms_norm eps")? as f32;
+        let row_width = weight.len();
+        let mut actual = Vec::new();
+        let mut failed = false;
+        for row in x.chunks_exact(row_width) {
+            let gpu_row = GpuTensor::from_host(row, &[row_width]).map_err(|e| format!("{e:?}"))?;
+            let gpu_weight = GpuTensor::from_host(&weight, &[row_width]).map_err(|e| format!("{e:?}"))?;
+            match rms_norm(&gpu_row, &gpu_weight, epsilon).await {
+                Ok(result) => actual.extend(result.to_host()),
+                Err(e) => {
+                    results.push(ValidationResult {
+                        name: "gpu/rms_norm".to_string(),
+                        passed: false,
+                        detail: Some(format!("{e:?}")),
+                    });
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if !failed {
+            results.push(compare_f32("gpu/rms_norm", &actual, &expected, 5e-4));
+        }
+    }
+
+    // GPU softmax
+    if let Some(fixture) = fixtures.get("softmax") {
+        let x = flatten_f32(value_at(fixture, "x")?);
+        let expected = flatten_f32(value_at(fixture, "out")?);
+        let row_width = last_dim_len(value_at(fixture, "x")?)?;
+        let mut actual = Vec::new();
+        for row in x.chunks_exact(row_width) {
+            let gpu_row = GpuTensor::from_host(row, &[row_width]).map_err(|e| format!("{e:?}"))?;
+            match softmax(&gpu_row).await {
+                Ok(result) => actual.extend(result.to_host()),
+                Err(e) => {
+                    results.push(ValidationResult {
+                        name: "gpu/softmax".to_string(),
+                        passed: false,
+                        detail: Some(format!("{e:?}")),
+                    });
+                    break;
+                }
+            }
+        }
+        if actual.len() == expected.len() {
+            results.push(compare_f32("gpu/softmax", &actual, &expected, 5e-4));
+        }
+    }
+
+    // GPU SiLU
+    if let Some(fixture) = fixtures.get("silu") {
+        let x = flatten_f32(value_at(fixture, "x")?);
+        let expected = flatten_f32(value_at(fixture, "out")?);
+        let gpu_x = GpuTensor::from_host(&x, &[x.len()]).map_err(|e| format!("{e:?}"))?;
+        match silu(&gpu_x).await {
+            Ok(result) => {
+                let actual = result.to_host();
+                results.push(compare_f32("gpu/silu", &actual, &expected, DEFAULT_TOLERANCE));
+            }
+            Err(e) => results.push(ValidationResult {
+                name: "gpu/silu".to_string(),
+                passed: false,
+                detail: Some(format!("{e:?}")),
+            }),
+        }
+    }
+
+    // GPU ReLU²
+    if let Some(fixture) = fixtures.get("relu2") {
+        let x = flatten_f32(value_at(fixture, "x")?);
+        let expected = flatten_f32(value_at(fixture, "out")?);
+        let gpu_x = GpuTensor::from_host(&x, &[x.len()]).map_err(|e| format!("{e:?}"))?;
+        match relu2(&gpu_x).await {
+            Ok(result) => {
+                let actual = result.to_host();
+                results.push(compare_f32("gpu/relu2", &actual, &expected, DEFAULT_TOLERANCE));
+            }
+            Err(e) => results.push(ValidationResult {
+                name: "gpu/relu2".to_string(),
+                passed: false,
+                detail: Some(format!("{e:?}")),
+            }),
+        }
+    }
+
+    Ok(ValidationReport {
+        results,
+        notes: vec!["gpu validation uses async kernel wrappers (host-fallback on macOS)".to_string()],
+    })
 }
 
 #[cfg(test)]
