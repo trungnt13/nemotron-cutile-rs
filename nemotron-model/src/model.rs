@@ -328,6 +328,10 @@ impl NemotronModel {
         &self,
         token_ids: &[u32],
     ) -> Result<ModelForwardOutput, ModelForwardError> {
+        if token_ids.is_empty() {
+            return self.forward_tokens(token_ids);
+        }
+
         let runtime = self
             .runtime
             .as_ref()
@@ -373,8 +377,9 @@ impl NemotronModel {
             .to_host_async()
             .await
             .map_err(|e| ModelForwardError::DeviceError(e.to_string()))?;
-        let hidden_states = rms_norm_rows(&hidden_host, &runtime.final_norm_weight, hidden_size, 1e-5)
-            .map_err(ModelForwardError::FinalNorm)?;
+        let hidden_states =
+            rms_norm_rows(&hidden_host, &runtime.final_norm_weight, hidden_size, 1e-5)
+                .map_err(ModelForwardError::FinalNorm)?;
         let logits = runtime
             .lm_head
             .project(&hidden_states, seq_len)
@@ -387,7 +392,10 @@ impl NemotronModel {
     }
 
     /// Async GPU predict next token. Delegates to `forward_tokens_gpu`.
-    pub async fn predict_next_token_gpu(&self, token_ids: &[u32]) -> Result<u32, ModelForwardError> {
+    pub async fn predict_next_token_gpu(
+        &self,
+        token_ids: &[u32],
+    ) -> Result<u32, ModelForwardError> {
         let output = self.forward_tokens_gpu(token_ids).await?;
         let vocab_size = self.config.vocab_size;
         let last_row = &output.logits[output.logits.len() - vocab_size..];
@@ -574,5 +582,31 @@ mod tests {
         let host_pred = model.predict_next_token(&[0, 1]).unwrap();
         let gpu_pred = model.predict_next_token_gpu(&[0, 1]).await.unwrap();
         assert_eq!(gpu_pred, host_pred);
+    }
+
+    /// Verifies that `forward_tokens_gpu` preserves the host error for empty inputs
+    /// instead of surfacing a GPU tensor shape error first.
+    ///
+    /// This catches regressions where the GPU wrapper changes observable behavior for
+    /// empty prompt edge cases.
+    #[tokio::test]
+    async fn gpu_forward_rejects_empty_input_like_host() {
+        let mut config = ModelConfig::default();
+        config.hidden_size = 2;
+        config.vocab_size = 2;
+        config.num_hidden_layers = 0;
+        config.hybrid_override_pattern.clear();
+        let runtime = ModelRuntime {
+            embeddings: EmbeddingTable::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap(),
+            blocks: Vec::new(),
+            final_norm_weight: vec![1.0, 1.0],
+            lm_head: identity_projection(2),
+        };
+        let model = NemotronModel::with_runtime(config, runtime);
+
+        let host_error = model.forward_tokens(&[]).unwrap_err();
+        let gpu_error = model.forward_tokens_gpu(&[]).await.unwrap_err();
+
+        assert_eq!(gpu_error, host_error);
     }
 }

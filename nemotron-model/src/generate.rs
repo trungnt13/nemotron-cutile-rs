@@ -158,33 +158,82 @@ mod tests {
     use super::*;
     use crate::config::ModelConfig;
     use crate::model::{EmbeddingTable, ModelRuntime};
+    use crate::{ModelTokenizer, DEFAULT_TOKENIZER_FILE};
     use nemotron_nn::LinearProjection;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::wordlevel::WordLevel;
+    use tokenizers::pre_tokenizers::whitespace::Whitespace;
+    use tokenizers::Tokenizer;
 
-    fn identity_projection(size: usize) -> LinearProjection {
-        let mut weights = vec![0.0; size * size];
-        for index in 0..size {
-            weights[index * size + index] = 1.0;
+    fn test_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nemotron-model-{name}-{unique}"))
+    }
+
+    fn write_test_tokenizer(path: &Path) {
+        let vocab = HashMap::from([
+            ("[UNK]".to_string(), 0u32),
+            ("hello".to_string(), 1u32),
+            ("world".to_string(), 2u32),
+        ]);
+
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .expect("word level tokenizer should build");
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Whitespace::default());
+        tokenizer
+            .save(path, false)
+            .expect("tokenizer should save to tokenizer.json");
+    }
+
+    fn tiny_config() -> ModelConfig {
+        let mut config = ModelConfig::default();
+        config.hidden_size = 2;
+        config.vocab_size = 3;
+        config.num_hidden_layers = 0;
+        config.hybrid_override_pattern.clear();
+        config.eos_token_id = Some(2);
+        config
+    }
+
+    fn tiny_runtime() -> ModelRuntime {
+        ModelRuntime {
+            embeddings: EmbeddingTable::new(
+                3,
+                2,
+                vec![
+                    1.0, 1.0, //
+                    1.0, 0.0, //
+                    0.0, 1.0,
+                ],
+            )
+            .unwrap(),
+            blocks: Vec::new(),
+            final_norm_weight: vec![1.0, 1.0],
+            lm_head: LinearProjection::new_dense_f32(
+                2,
+                3,
+                vec![
+                    0.0, 0.0, 1.0, //
+                    0.0, 0.0, 1.0,
+                ],
+                None,
+            )
+            .unwrap(),
         }
-        LinearProjection::new_dense_f32(size, size, weights, None).unwrap()
     }
 
     fn tiny_runtime_model() -> NemotronModel {
-        let mut config = ModelConfig::default();
-        config.hidden_size = 2;
-        config.vocab_size = 2;
-        config.num_hidden_layers = 0;
-        config.hybrid_override_pattern.clear();
-        config.eos_token_id = Some(1);
-
-        NemotronModel::with_runtime(
-            config,
-            ModelRuntime {
-                embeddings: EmbeddingTable::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap(),
-                blocks: Vec::new(),
-                final_norm_weight: vec![1.0, 1.0],
-                lm_head: identity_projection(2),
-            },
-        )
+        NemotronModel::with_runtime(tiny_config(), tiny_runtime())
     }
 
     /// Verifies that `generation_preview` gracefully reports both "tokenizer not loaded"
@@ -218,5 +267,55 @@ mod tests {
             result,
             GenerationError::Text(ModelTextError::MissingTokenizer)
         );
+    }
+
+    /// Verifies that `generate_gpu` produces the same EOS-stopped result as `generate`
+    /// when the runtime always predicts the EOS token.
+    ///
+    /// This catches regressions where the async GPU loop diverges from host token
+    /// accumulation, stopping, or decode behavior.
+    #[tokio::test]
+    async fn generate_gpu_matches_host_generation() {
+        let root = test_root("generate-gpu");
+        fs::create_dir_all(&root).expect("test root should be created");
+        write_test_tokenizer(&root.join(DEFAULT_TOKENIZER_FILE));
+
+        let tokenizer = ModelTokenizer::from_model_root(&root).expect("tokenizer should load");
+        let model =
+            NemotronModel::with_runtime_and_tokenizer(tiny_config(), tiny_runtime(), tokenizer);
+        let request = GenerationRequest {
+            prompt: "hello".to_string(),
+            max_new_tokens: 5,
+            add_special_tokens: false,
+            stop_on_eos: true,
+        };
+
+        let host_result = model.generate(&request).unwrap();
+        let gpu_result = model.generate_gpu(&request).await.unwrap();
+
+        assert_eq!(gpu_result, host_result);
+
+        fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    /// Verifies that `generate_gpu` preserves the host forward error for an empty prompt
+    /// when special-token insertion is disabled.
+    ///
+    /// This catches regressions where the GPU path reports a device-shape error instead of
+    /// the same model-forward error the host generation loop returns.
+    #[tokio::test]
+    async fn generate_gpu_preserves_empty_prompt_error() {
+        let model = tiny_runtime_model();
+        let request = GenerationRequest {
+            prompt: String::new(),
+            max_new_tokens: 2,
+            add_special_tokens: false,
+            stop_on_eos: false,
+        };
+
+        let host_error = model.generate(&request).unwrap_err();
+        let gpu_error = model.generate_gpu(&request).await.unwrap_err();
+
+        assert_eq!(gpu_error, host_error);
     }
 }
