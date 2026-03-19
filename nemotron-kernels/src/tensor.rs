@@ -48,7 +48,42 @@ impl std::error::Error for TensorError {}
 #[cfg(target_os = "linux")]
 mod inner {
     use super::TensorError;
-    use std::sync::Arc;
+    use std::fmt;
+    use std::sync::{Arc, OnceLock};
+
+    use cutile::cuda_async::device_operation::DeviceOperation;
+    use cutile::cuda_core::{CudaContext, CudaStream};
+    use cutile::tensor::ToHostVec;
+
+    /// Lazily-initialized CUDA context + stream for synchronous tensor ops.
+    /// Using `sync_on(&stream)` avoids requiring a tokio runtime, so
+    /// `GpuTensor::from_host()` / `to_host()` work from plain `#[test]`
+    /// functions as well as from inside async contexts.
+    struct SyncCudaRuntime {
+        _context: Arc<CudaContext>,
+        stream: Arc<CudaStream>,
+    }
+
+    // SAFETY: CudaContext and CudaStream are Send+Sync (verified from cutile source).
+    unsafe impl Send for SyncCudaRuntime {}
+    unsafe impl Sync for SyncCudaRuntime {}
+
+    static SYNC_RUNTIME: OnceLock<SyncCudaRuntime> = OnceLock::new();
+
+    fn sync_stream() -> &'static Arc<CudaStream> {
+        &SYNC_RUNTIME
+            .get_or_init(|| {
+                let context = CudaContext::new(0).expect("CUDA context init for sync tensor ops");
+                let stream = context
+                    .new_stream()
+                    .expect("CUDA stream for sync tensor ops");
+                SyncCudaRuntime {
+                    _context: context,
+                    stream,
+                }
+            })
+            .stream
+    }
 
     /// Wraps `cutile::tensor::Tensor<f32>` on Linux.
     pub struct TensorInner {
@@ -57,11 +92,9 @@ mod inner {
 
     impl TensorInner {
         pub fn zeros(numel: usize) -> Self {
-            // Lazy: actual allocation happens when awaited on GPU.
-            // For now we create via the host-copy path with a zero vec.
             let data = Arc::new(vec![0.0f32; numel]);
-            let tensor = tokio::runtime::Handle::current()
-                .block_on(async { cutile::api::copy_host_vec_to_device(&data).await })
+            let tensor = cutile::api::copy_host_vec_to_device(&data)
+                .sync_on(sync_stream())
                 .expect("cutile zeros allocation");
             Self {
                 tensor: Arc::new(tensor),
@@ -70,8 +103,8 @@ mod inner {
 
         pub fn from_host(data: &[f32]) -> Self {
             let data = Arc::new(data.to_vec());
-            let tensor = tokio::runtime::Handle::current()
-                .block_on(async { cutile::api::copy_host_vec_to_device(&data).await })
+            let tensor = cutile::api::copy_host_vec_to_device(&data)
+                .sync_on(sync_stream())
                 .expect("cutile host-to-device copy");
             Self {
                 tensor: Arc::new(tensor),
@@ -89,14 +122,13 @@ mod inner {
         }
 
         pub fn to_host(&self) -> Vec<f32> {
-            use cutile::tensor::ToHostVec;
-            tokio::runtime::Handle::current()
-                .block_on(async { self.tensor.clone().to_host_vec().await })
+            (&self.tensor)
+                .to_host_vec()
+                .sync_on(sync_stream())
                 .expect("cutile device-to-host copy")
         }
 
         pub async fn to_host_async(&self) -> Result<Vec<f32>, TensorError> {
-            use cutile::tensor::ToHostVec;
             self.tensor
                 .clone()
                 .to_host_vec()
@@ -122,8 +154,6 @@ mod inner {
             write!(f, "TensorInner(cutile)")
         }
     }
-
-    use std::fmt;
 }
 
 #[cfg(not(target_os = "linux"))]
