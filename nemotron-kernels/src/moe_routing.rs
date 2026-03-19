@@ -6,6 +6,9 @@ pub const SPEC: KernelStub = KernelStub {
     summary: "Top-k expert routing kernels with sigmoid_host scoring.",
 };
 
+#[cfg(any(target_os = "linux", test))]
+const CUTILE_MAX_TOP_K: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MoeRoutingBackend {
     HostFallback,
@@ -55,9 +58,14 @@ pub struct MoeRoutingOutput {
     pub weights: Vec<f32>,
 }
 
+#[cfg(target_os = "linux")]
+const MOE_ROUTING_BACKEND: MoeRoutingBackend = MoeRoutingBackend::Cutile;
+#[cfg(not(target_os = "linux"))]
+const MOE_ROUTING_BACKEND: MoeRoutingBackend = MoeRoutingBackend::HostFallback;
+
 pub const MOE_SIGMOID_TOPK: MoeRoutingKernel = MoeRoutingKernel {
     name: "moe_sigmoid_topk",
-    backend: MoeRoutingBackend::HostFallback,
+    backend: MOE_ROUTING_BACKEND,
 };
 
 pub fn supported_moe_routing_kernels() -> [MoeRoutingKernel; 1] {
@@ -258,6 +266,271 @@ fn validate_shape(shape: MoeRoutingShape) -> Result<(), MoeRoutingError> {
     Ok(())
 }
 
+fn validate_tensor_lengths(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<(), MoeRoutingError> {
+    validate_shape(shape)?;
+
+    if scores.numel() != shape.score_len() {
+        return Err(MoeRoutingError::LengthMismatch {
+            argument: "scores",
+            expected: shape.score_len(),
+            actual: scores.numel(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn supports_cutile_moe_routing(shape: MoeRoutingShape) -> bool {
+    shape.token_count > 0
+        && matches!(shape.expert_count, 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128)
+        && shape.top_k <= shape.expert_count
+        && shape.top_k <= CUTILE_MAX_TOP_K
+        && i32::try_from(shape.token_count).is_ok()
+        && i32::try_from(shape.expert_count).is_ok()
+        && i32::try_from(shape.top_k).is_ok()
+}
+
+fn backend_for_shape(_shape: MoeRoutingShape) -> MoeRoutingBackend {
+    #[cfg(target_os = "linux")]
+    {
+        if supports_cutile_moe_routing(_shape) {
+            return MoeRoutingBackend::Cutile;
+        }
+    }
+
+    MoeRoutingBackend::HostFallback
+}
+
+#[cfg(target_os = "linux")]
+mod cutile_impl {
+    use super::{supports_cutile_moe_routing, MoeRoutingError, MoeRoutingOutput, MoeRoutingShape};
+    use crate::tensor::GpuTensor;
+    use cutile::tensor::ToHostVec;
+    use cutile::tile_kernel::{IntoDeviceOperation, IntoDeviceOperationPartition, TileKernel};
+
+    #[cutile::module]
+    mod cutile_moe_routing_kernel {
+        use cutile::core::*;
+
+        #[cutile::entry()]
+        fn moe_sigmoid_topk<const EXPERT_COUNT: i32, const TOP_K: i32, const PADDED_TOP_K: i32>(
+            indices: &mut Tensor<i32, { [1, PADDED_TOP_K] }>,
+            weights: &mut Tensor<f32, { [1, PADDED_TOP_K] }>,
+            scores: &Tensor<f32, { [-1, EXPERT_COUNT] }>,
+            token_count: i32,
+        ) {
+            let token_index = get_tile_block_id().0;
+            if token_index >= token_count {
+                return;
+            }
+            let scores_part = scores.partition(const_shape![1, EXPERT_COUNT]);
+            let score_tile: Tile<f32, { [1, EXPERT_COUNT] }> =
+                scores_part.load([token_index, 0i32]);
+            let score_tile: Tile<f32, { [EXPERT_COUNT] }> =
+                score_tile.reshape(const_shape![EXPERT_COUNT]);
+
+            let zero: Tile<f32, { [EXPERT_COUNT] }> = constant(0.0f32, const_shape![EXPERT_COUNT]);
+            let one: Tile<f32, { [EXPERT_COUNT] }> = constant(1.0f32, const_shape![EXPERT_COUNT]);
+            let nonnegative: Tile<bool, { [EXPERT_COUNT] }> = ge_tile(score_tile, zero);
+            let positive_sigmoid: Tile<f32, { [EXPERT_COUNT] }> =
+                one / (one + exp(zero - score_tile));
+            let exp_score: Tile<f32, { [EXPERT_COUNT] }> = exp(score_tile);
+            let negative_sigmoid: Tile<f32, { [EXPERT_COUNT] }> = exp_score / (one + exp_score);
+            let mut remaining_weights: Tile<f32, { [EXPERT_COUNT] }> =
+                select(nonnegative, positive_sigmoid, negative_sigmoid);
+
+            let expert_positions: Tile<i32, { [EXPERT_COUNT] }> = iota(const_shape![EXPERT_COUNT]);
+            let route_positions: Tile<i32, { [PADDED_TOP_K] }> = iota(const_shape![PADDED_TOP_K]);
+            let mut selected_indices: Tile<i32, { [PADDED_TOP_K] }> =
+                constant(0i32, const_shape![PADDED_TOP_K]);
+            let mut selected_weights: Tile<f32, { [PADDED_TOP_K] }> =
+                constant(0.0f32, const_shape![PADDED_TOP_K]);
+            let neg_inf: Tile<f32, { [EXPERT_COUNT] }> =
+                constant(f32::NEG_INFINITY, const_shape![EXPERT_COUNT]);
+            let tie_break_sentinel: Tile<i32, { [EXPERT_COUNT] }> =
+                broadcast_scalar(EXPERT_COUNT, const_shape![EXPERT_COUNT]);
+
+            for route_index in 0i32..TOP_K {
+                let max_weight_tile: Tile<f32, { [1] }> = reduce_max(remaining_weights, 0i32);
+                let max_weight: f32 = tile_to_scalar(max_weight_tile.reshape(const_shape![]));
+                let max_weight_broadcast: Tile<f32, { [EXPERT_COUNT] }> =
+                    broadcast_scalar(max_weight, const_shape![EXPERT_COUNT]);
+                let tied_max: Tile<bool, { [EXPERT_COUNT] }> =
+                    eq_tile(remaining_weights, max_weight_broadcast);
+                let candidate_indices: Tile<i32, { [EXPERT_COUNT] }> =
+                    select(tied_max, expert_positions, tie_break_sentinel);
+                let chosen_index_tile: Tile<i32, { [1] }> = reduce_min(candidate_indices, 0i32);
+                let chosen_index: i32 = tile_to_scalar(chosen_index_tile.reshape(const_shape![]));
+
+                let route_mask: Tile<bool, { [PADDED_TOP_K] }> = eq_tile(
+                    route_positions,
+                    broadcast_scalar(route_index, const_shape![PADDED_TOP_K]),
+                );
+                let chosen_indices_out: Tile<i32, { [PADDED_TOP_K] }> =
+                    broadcast_scalar(chosen_index, const_shape![PADDED_TOP_K]);
+                let chosen_weights_out: Tile<f32, { [PADDED_TOP_K] }> =
+                    broadcast_scalar(max_weight, const_shape![PADDED_TOP_K]);
+                selected_indices = select(route_mask, chosen_indices_out, selected_indices);
+                selected_weights = select(route_mask, chosen_weights_out, selected_weights);
+
+                let chosen_mask: Tile<bool, { [EXPERT_COUNT] }> = eq_tile(
+                    expert_positions,
+                    broadcast_scalar(chosen_index, const_shape![EXPERT_COUNT]),
+                );
+                remaining_weights = select(chosen_mask, neg_inf, remaining_weights);
+            }
+
+            indices.store(selected_indices.reshape(const_shape![1, PADDED_TOP_K]));
+            weights.store(selected_weights.reshape(const_shape![1, PADDED_TOP_K]));
+        }
+    }
+
+    use cutile_moe_routing_kernel::moe_sigmoid_topk_async;
+
+    fn device_error(prefix: &str, error: impl std::fmt::Debug) -> MoeRoutingError {
+        MoeRoutingError::DeviceError(format!("{prefix}: {error:?}"))
+    }
+
+    pub(super) async fn moe_route(
+        scores: &GpuTensor,
+        shape: MoeRoutingShape,
+    ) -> Result<Option<MoeRoutingOutput>, MoeRoutingError> {
+        if !supports_cutile_moe_routing(shape) {
+            return Ok(None);
+        }
+
+        let token_count_i32 = i32::try_from(shape.token_count).map_err(|_| {
+            MoeRoutingError::DeviceError(format!(
+                "cutile MoE token_count {} exceeds the supported i32 launch bound",
+                shape.token_count
+            ))
+        })?;
+        let padded_top_k = shape.top_k.next_power_of_two();
+        let padded_token_count = shape.token_count.next_power_of_two();
+        let padded_top_k_i32 = i32::try_from(padded_top_k).map_err(|_| {
+            MoeRoutingError::DeviceError(format!(
+                "cutile MoE padded top_k {padded_top_k} exceeds the supported i32 launch bound"
+            ))
+        })?;
+        let scores_tensor = scores
+            .cutile_tensor_for_shape(&[shape.token_count, shape.expert_count])
+            .await?;
+        let output_indices = cutile::api::zeros::<2, i32>([padded_token_count, padded_top_k])
+            .partition([1, padded_top_k_i32]);
+        let output_weights = cutile::api::zeros::<2, f32>([padded_token_count, padded_top_k])
+            .partition([1, padded_top_k_i32]);
+        let generics = vec![
+            shape.expert_count.to_string(),
+            shape.top_k.to_string(),
+            padded_top_k.to_string(),
+        ];
+        let (output_indices, output_weights, _scores, _token_count) = moe_sigmoid_topk_async(
+            output_indices,
+            output_weights,
+            scores_tensor.device_operation(),
+            cutile::tile_kernel::value(token_count_i32),
+        )
+        .generics(generics)
+        .await
+        .map_err(|error| device_error("cutile MoE launch failed", error))?;
+        let output_indices = output_indices.unpartition();
+        let output_weights = output_weights.unpartition();
+        let indices = output_indices
+            .to_host_vec()
+            .await
+            .map_err(|error| device_error("cutile MoE indices transfer failed", error))?;
+        let weights = output_weights
+            .to_host_vec()
+            .await
+            .map_err(|error| device_error("cutile MoE weights transfer failed", error))?;
+        let mut compact_indices = Vec::with_capacity(shape.route_len());
+        let mut compact_weights = Vec::with_capacity(shape.route_len());
+        for token_index in 0..shape.token_count {
+            let row_start = token_index * padded_top_k;
+            let row_end = row_start + shape.top_k;
+            compact_indices.extend(
+                indices[row_start..row_end]
+                    .iter()
+                    .copied()
+                    .map(|index| {
+                        usize::try_from(index).map_err(|_| {
+                            MoeRoutingError::DeviceError(format!(
+                                "cutile MoE index {index} could not convert to usize"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            compact_weights.extend_from_slice(&weights[row_start..row_end]);
+        }
+
+        Ok(Some(MoeRoutingOutput {
+            indices: compact_indices,
+            weights: compact_weights,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+async fn moe_route_host_bridge(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    let data = scores.to_host_async().await?;
+    moe_route_host(&data, shape)
+}
+
+async fn moe_route_softmax_host_bridge(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    let data = scores.to_host_async().await?;
+    moe_route_softmax_host(&data, shape)
+}
+
+/// Async GPU MoE routing (sigmoid scoring with top-k selection).
+pub async fn moe_route(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    validate_tensor_lengths(scores, shape)?;
+
+    match backend_for_shape(shape) {
+        MoeRoutingBackend::Cutile => {
+            #[cfg(target_os = "linux")]
+            {
+                return cutile_impl::moe_route(scores, shape).await?.ok_or_else(|| {
+                    MoeRoutingError::DeviceError(
+                        "cutile MoE routing reported support but did not launch".to_string(),
+                    )
+                });
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                unreachable!("non-Linux platforms never select the cutile MoE routing backend")
+            }
+        }
+        MoeRoutingBackend::HostFallback => moe_route_host_bridge(scores, shape).await,
+    }
+}
+
+/// Async GPU MoE routing with softmax normalization.
+pub async fn moe_route_softmax(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    validate_tensor_lengths(scores, shape)?;
+    moe_route_softmax_host_bridge(scores, shape).await
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MoeRoutingError {
     InvalidShape(MoeRoutingShape),
@@ -275,66 +548,70 @@ impl From<TensorError> for MoeRoutingError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Async GPU API
-// ---------------------------------------------------------------------------
-
-/// Async GPU MoE routing (sigmoid scoring with top-k selection).
-pub async fn moe_route(
-    scores: &GpuTensor,
-    shape: MoeRoutingShape,
-) -> Result<MoeRoutingOutput, MoeRoutingError> {
-    let data = scores.to_host_async().await?;
-    moe_route_host(&data, shape)
-}
-
-/// Async GPU MoE routing with softmax normalization.
-pub async fn moe_route_softmax(
-    scores: &GpuTensor,
-    shape: MoeRoutingShape,
-) -> Result<MoeRoutingOutput, MoeRoutingError> {
-    let data = scores.to_host_async().await?;
-    moe_route_softmax_host(&data, shape)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn approx_eq(lhs: f32, rhs: f32) {
+        approx_eq_with_tolerance(lhs, rhs, 1e-6);
+    }
+
+    fn approx_eq_with_tolerance(lhs: f32, rhs: f32, tolerance: f32) {
         let diff = (lhs - rhs).abs();
         assert!(
-            diff <= 1e-6,
-            "values differ: left={lhs:?}, right={rhs:?}, diff={diff:?}"
+            diff <= tolerance,
+            "values differ: left={lhs:?}, right={rhs:?}, diff={diff:?}, tolerance={tolerance:?}"
         );
     }
 
     fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
+        approx_eq_slice_with_tolerance(lhs, rhs, 1e-6);
+    }
+
+    fn approx_eq_slice_with_tolerance(lhs: &[f32], rhs: &[f32], tolerance: f32) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
         for (index, (left, right)) in lhs.iter().zip(rhs.iter()).enumerate() {
             let diff = (left - right).abs();
             assert!(
-                diff <= 1e-6,
-                "index {index}: left={left:?}, right={right:?}, diff={diff:?}"
+                diff <= tolerance,
+                "index {index}: left={left:?}, right={right:?}, diff={diff:?}, tolerance={tolerance:?}"
             );
         }
     }
 
-    /// Verifies that the MoE routing kernel reports HostFallback as its backend.
+    /// Verifies that the MoE routing kernel registry reports the current platform's primary backend.
     ///
-    /// This catches accidental backend tag changes before GPU kernels exist.
+    /// This catches accidental backend metadata regressions as Linux enables cutile routing while other platforms keep host fallback.
     #[test]
-    fn reports_host_fallback_backend_for_now() {
-        assert_eq!(
-            supported_moe_routing_kernels(),
-            [MoeRoutingKernel {
-                name: "moe_sigmoid_topk",
-                backend: MoeRoutingBackend::HostFallback,
-            }]
-        );
+    fn reports_platform_primary_backend() {
+        #[cfg(target_os = "linux")]
+        let expected = [MoeRoutingKernel {
+            name: "moe_sigmoid_topk",
+            backend: MoeRoutingBackend::Cutile,
+        }];
+
+        #[cfg(not(target_os = "linux"))]
+        let expected = [MoeRoutingKernel {
+            name: "moe_sigmoid_topk",
+            backend: MoeRoutingBackend::HostFallback,
+        }];
+
+        assert_eq!(supported_moe_routing_kernels(), expected);
     }
 
-    /// Verifies sigmoid_host top-k routing selects the two highest-scored experts.
+    /// Verifies that the cutile routing heuristic only accepts the planned expert-count and top-k envelope.
+    ///
+    /// This catches regressions where Linux would try to launch the cutile kernel for unsupported MoE shapes instead of falling back cleanly.
+    #[test]
+    fn cutile_support_heuristic_respects_shape_boundaries() {
+        assert!(supports_cutile_moe_routing(MoeRoutingShape::new(2, 8, 2)));
+        assert!(supports_cutile_moe_routing(MoeRoutingShape::new(1, 128, 6)));
+        assert!(!supports_cutile_moe_routing(MoeRoutingShape::new(0, 8, 2)));
+        assert!(!supports_cutile_moe_routing(MoeRoutingShape::new(2, 5, 2)));
+        assert!(!supports_cutile_moe_routing(MoeRoutingShape::new(2, 8, 9)));
+    }
+
+    /// Verifies sigmoid_host top-k routing selects the two highest-scored experts when routing one token.
     ///
     /// This catches errors in the sigmoid_host transform or sort/select logic.
     #[test]
@@ -345,7 +622,7 @@ mod tests {
         approx_eq_slice(&output.weights, &[0.880797, 0.7310586]);
     }
 
-    /// Verifies that multi-token routing processes each token's scores independently.
+    /// Verifies that multi-token routing processes each token's scores independently when the input is row-major.
     ///
     /// This catches row-stride indexing errors in the batched routing path.
     #[test]
@@ -363,7 +640,7 @@ mod tests {
         );
     }
 
-    /// Verifies that equal scores break ties toward the lower expert index.
+    /// Verifies that equal scores break ties toward the lower expert index when routing a token.
     ///
     /// This catches unstable or reversed tie-breaking in the sort comparator.
     #[test]
@@ -375,7 +652,7 @@ mod tests {
         approx_eq(output.weights[1], 0.5);
     }
 
-    /// Verifies that the _into variant writes into pre-allocated buffers.
+    /// Verifies that the _into variant writes routing results into caller-provided buffers when batching tokens.
     ///
     /// This catches bugs where _into silently re-allocates instead of writing in place.
     #[test]
@@ -395,9 +672,9 @@ mod tests {
         approx_eq_slice(&weights, &[0.7109495, 0.62245935, 0.95257413, 0.5]);
     }
 
-    /// Verifies softmax_host-normalized top-k routing with re-normalized selected weights.
+    /// Verifies softmax_host-normalized top-k routing re-normalizes only the selected weights when softmax routing is requested.
     ///
-    /// This catches errors in the softmax_host computation or top-k re-normalization.
+    /// This catches errors in the softmax_host computation or selected-weight normalization contract.
     #[test]
     fn routes_with_softmax_normalized_top_k_weights() {
         let output = moe_route_softmax_host(
@@ -412,9 +689,9 @@ mod tests {
         approx_eq_slice(&output.weights, &[0.7646013, 0.23539874]);
     }
 
-    /// Verifies that routing zero tokens produces empty output without error.
+    /// Verifies that routing zero tokens produces empty output when expert and top-k dimensions are still valid.
     ///
-    /// This catches panics on zero-length inputs.
+    /// This catches panics on zero-length batches.
     #[test]
     fn empty_token_batch_produces_empty_routes() {
         let output = moe_route_host(&[], MoeRoutingShape::new(0, 4, 2)).unwrap();
@@ -423,7 +700,7 @@ mod tests {
         assert!(output.weights.is_empty());
     }
 
-    /// Verifies that zero expert_count is rejected as an invalid shape.
+    /// Verifies that zero expert_count is rejected when validating the routing shape.
     ///
     /// This catches missing dimension validation.
     #[test]
@@ -435,9 +712,9 @@ mod tests {
         );
     }
 
-    /// Verifies that top_k > expert_count is rejected.
+    /// Verifies that top_k greater than expert_count is rejected when validating a routing request.
     ///
-    /// This catches missing constraint validation between top_k and expert_count.
+    /// This catches missing top-k versus expert-count validation.
     #[test]
     fn rejects_top_k_larger_than_expert_count() {
         let error = moe_route_host(&[0.0, 1.0], MoeRoutingShape::new(1, 2, 3)).unwrap_err();
@@ -447,7 +724,7 @@ mod tests {
         );
     }
 
-    /// Verifies that a score buffer not matching token_count × expert_count is rejected.
+    /// Verifies that a score buffer not matching token_count × expert_count is rejected when routing on host.
     ///
     /// This catches missing score length validation.
     #[test]
@@ -463,7 +740,7 @@ mod tests {
         );
     }
 
-    /// Verifies that a too-small indices buffer is rejected in the _into variant.
+    /// Verifies that a too-small indices buffer is rejected when using the _into host API.
     ///
     /// This catches missing indices length validation.
     #[test]
@@ -488,7 +765,7 @@ mod tests {
         );
     }
 
-    /// Verifies that a too-small weights buffer is rejected in the _into variant.
+    /// Verifies that a too-small weights buffer is rejected when using the _into host API.
     ///
     /// This catches missing weights length validation.
     #[test]
@@ -513,7 +790,7 @@ mod tests {
         );
     }
 
-    /// Verifies that top_k=0 is rejected in the single-token routing API.
+    /// Verifies that top_k=0 is rejected when routing through the single-token convenience API.
     ///
     /// This catches missing validation in the convenience wrapper.
     #[test]
@@ -525,22 +802,29 @@ mod tests {
         );
     }
 
-    /// Verifies that the async GPU MoE routing matches the host fallback.
-    /// This catches regressions in the GPU routing path.
+    /// Verifies that the async GPU sigmoid-routing API matches the host reference when given a cutile-supported tiny shape.
+    ///
+    /// This catches regressions in GPU routing parity while still exercising Linux cutile dispatch where available.
     #[tokio::test]
-    async fn gpu_moe_route_matches_host_fallback() {
+    async fn gpu_moe_route_matches_host_reference() {
         let scores = vec![0.1, 0.9, 0.4, 0.6];
         let shape = MoeRoutingShape::new(2, 2, 1);
         let expected = moe_route_host(&scores, shape).unwrap();
         let gpu_scores = GpuTensor::from_host(&scores, &[2, 2]).unwrap();
         let result = super::moe_route(&gpu_scores, shape).await.unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(backend_for_shape(shape), MoeRoutingBackend::Cutile);
+
         assert_eq!(result.indices, expected.indices);
-        assert_eq!(result.weights, expected.weights);
+        approx_eq_slice_with_tolerance(&result.weights, &expected.weights, 5e-6);
     }
 
-    /// Verifies that the async GPU softmax MoE routing wrapper matches the host fallback when routing multiple tokens. This catches regressions in score transfer or top-k softmax normalization on the async wrapper path.
+    /// Verifies that the async GPU softmax-routing API matches the host reference when routing multiple tokens.
+    ///
+    /// This catches regressions in score transfer or top-k softmax normalization on the async wrapper path.
     #[tokio::test]
-    async fn gpu_moe_route_softmax_matches_host_fallback() {
+    async fn gpu_moe_route_softmax_matches_host_reference() {
         let scores = vec![
             0.4390189, 1.2967792, 2.4748528, 1.1023278, -1.263859, 0.51365805,
         ];
@@ -552,5 +836,30 @@ mod tests {
 
         assert_eq!(result.indices, expected.indices);
         approx_eq_slice(&result.weights, &expected.weights);
+    }
+
+    /// Verifies that the Linux GPU routing path matches the host reference when exercising a model-like 128-expert, top-6 shape.
+    ///
+    /// This catches regressions in repeated top-k selection, stable sigmoid scoring, or tie-breaking on the real cutile MoE kernel.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gpu_moe_route_uses_cutile_for_model_like_shape() {
+        let shape = MoeRoutingShape::new(2, 128, 6);
+        assert_eq!(backend_for_shape(shape), MoeRoutingBackend::Cutile);
+
+        let scores = (0..shape.score_len())
+            .map(|index| {
+                let token = index / shape.expert_count;
+                let expert = index % shape.expert_count;
+                ((expert % 17) as f32 - 8.0) * 0.375 + token as f32 * 0.125 - 0.05
+            })
+            .collect::<Vec<_>>();
+        let expected = moe_route_host(&scores, shape).unwrap();
+        let gpu_scores =
+            GpuTensor::from_host(&scores, &[shape.token_count, shape.expert_count]).unwrap();
+        let result = super::moe_route(&gpu_scores, shape).await.unwrap();
+
+        assert_eq!(result.indices, expected.indices);
+        approx_eq_slice_with_tolerance(&result.weights, &expected.weights, 5e-6);
     }
 }
