@@ -1,9 +1,9 @@
 ---
-status: implemented-with-open-gaps
+status: complete
 goal: Add a repeatable Docker development launcher that bind mounts the repository read-write for VSCode attach workflows
 prompt: "create dev.sh scripts, build and run Docker container, and bind mount the git repo rw for VSCode attach to container development"
 created: 2026-03-19T13:01:09Z
-finished: 2026-03-19T13:20:30Z
+finished: 2026-03-19T13:54:08Z
 ---
 
 # Executed Plan — Add Dev Container Launch Script
@@ -34,7 +34,7 @@ Added a root `dev.sh` helper for building and running a long-lived GPU developme
 
 ## Verification
 
-Verification completed on `tn` with one remaining containerized Rust-build blocker:
+Verification completed on `tn`:
 
 ```bash
 bash -n dev.sh
@@ -60,10 +60,8 @@ Observed results:
   - `torch==2.9.1+cu130`
   - `torch.cuda.is_available() == True`
   - `nvidia-smi -L` reports the RTX 3090
-- in-container `cargo build --workspace`: still blocked in the `cutile` toolchain setup
+- in-container `cargo build --workspace --quiet`: passed after adding the missing LLVM/MLIR toolchain dependencies and switching the dev container default toolchain to nightly
 
 ## Open Gaps
 
-1. The container itself now starts with GPU access on `tn`, but the mounted-repo Rust build still fails in `cutile`'s LLVM/MLIR CMake path.
-2. The current blocker is no longer `llvm-config` or missing MLIR headers; it is missing CMake-imported dependency targets from the prebuilt LLVM install path, starting with `ZLIB::ZLIB`, and the log also notes `CURL` and `LibEdit` were not found.
-3. `INSTALL_LLAMA_CPP=0` remains the dev-launcher default because it keeps editor-attach bring-up practical; full `llama.cpp` remains available through Docker build args when explicitly needed.
+1. `INSTALL_LLAMA_CPP=0` remains the dev-launcher default because it keeps editor-attach bring-up practical; full `llama.cpp` remains available through Docker build args when explicitly needed.

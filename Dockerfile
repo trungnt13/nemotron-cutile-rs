@@ -4,6 +4,7 @@ FROM nvidia/cuda:13.2.0-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.94.0
+ARG RUST_NIGHTLY_TOOLCHAIN=nightly
 ARG PYTORCH_CUDA=cu130
 ARG VLLM_VERSION=0.16.0
 ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git
@@ -19,6 +20,8 @@ ARG USER_GID=1000
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     VIRTUAL_ENV=/opt/venv \
+    RUST_STABLE_TOOLCHAIN=${RUST_VERSION} \
+    RUSTUP_TOOLCHAIN=${RUST_NIGHTLY_TOOLCHAIN} \
     CUDA_TOOLKIT_PATH=/usr/local/cuda-13.2 \
     CUDA_PATH=/usr/local/cuda-13.2 \
     CUDA_TILE_USE_LLVM_INSTALL_DIR=/usr/lib/llvm-21 \
@@ -47,11 +50,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     git \
     libclang-21-dev \
+    libcurl4-openssl-dev \
+    libedit-dev \
     libmlir-21-dev \
     llvm-21 \
     llvm-21-dev \
     mlir-21-tools \
     libonig-dev \
+    libpolly-21-dev \
     libssl-dev \
     libzstd-dev \
     ninja-build \
@@ -60,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     sudo \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/local/cuda /usr/local/cuda-13.2 \
@@ -73,8 +80,10 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
     && rustup default "${RUST_VERSION}" \
+    && rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}" --profile minimal \
     && rustc --version \
-    && cargo --version
+    && cargo --version \
+    && rustup run "${RUST_NIGHTLY_TOOLCHAIN}" rustc --version
 
 RUN if [[ "${INSTALL_PYTHON_STACK}" == "1" ]]; then \
         uv pip install --python "${VIRTUAL_ENV}/bin/python" \
