@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "ssm",
@@ -232,7 +233,7 @@ fn ssm_tensor_offset(
     ((timestep * shape.channel_count + channel) * shape.state_size) + state_index
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SsmError {
     InvalidShape(SelectiveScanShape),
     LengthMismatch {
@@ -245,6 +246,78 @@ pub enum SsmError {
         channel: usize,
         value: f32,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for SsmError {
+    fn from(e: TensorError) -> Self {
+        SsmError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// GPU-side selective scan parameters using GpuTensors.
+pub struct GpuSelectiveScanParams<'a> {
+    pub input: &'a GpuTensor,
+    pub delta_t: &'a GpuTensor,
+    pub a: &'a GpuTensor,
+    pub b: &'a GpuTensor,
+    pub c: &'a GpuTensor,
+    pub d: Option<&'a GpuTensor>,
+    pub initial_state: Option<&'a GpuTensor>,
+    pub delta_bias: f32,
+    pub apply_softplus_to_dt: bool,
+}
+
+/// Output of the async GPU selective scan.
+pub struct GpuSelectiveScanOutput {
+    pub output: GpuTensor,
+    pub final_state: GpuTensor,
+}
+
+/// Async GPU selective scan (Mamba-2 SSM kernel).
+pub async fn selective_scan(
+    params: GpuSelectiveScanParams<'_>,
+    shape: SelectiveScanShape,
+) -> Result<GpuSelectiveScanOutput, SsmError> {
+    let input = params.input.to_host_async().await?;
+    let delta_t = params.delta_t.to_host_async().await?;
+    let a = params.a.to_host_async().await?;
+    let b = params.b.to_host_async().await?;
+    let c = params.c.to_host_async().await?;
+    let d = match params.d {
+        Some(t) => Some(t.to_host_async().await?),
+        None => None,
+    };
+    let initial_state = match params.initial_state {
+        Some(t) => Some(t.to_host_async().await?),
+        None => None,
+    };
+
+    let host_params = SelectiveScanParams {
+        input: &input,
+        delta_t: &delta_t,
+        a: &a,
+        b: &b,
+        c: &c,
+        d: d.as_deref(),
+        initial_state: initial_state.as_deref(),
+        delta_bias: params.delta_bias,
+        apply_softplus_to_dt: params.apply_softplus_to_dt,
+    };
+
+    let host_result = selective_scan_host(host_params, shape)?;
+    let output_shape = &[shape.sequence_len, shape.channel_count];
+    let state_shape = &[shape.channel_count, shape.state_size];
+    Ok(GpuSelectiveScanOutput {
+        output: GpuTensor::from_host_async(&host_result.values, output_shape).await?,
+        final_state: GpuTensor::from_host_async(&host_result.final_state, state_shape).await?,
+    })
 }
 
 #[cfg(test)]

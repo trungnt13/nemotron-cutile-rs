@@ -5,6 +5,8 @@
 //! development and testing.
 
 use std::fmt;
+
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------

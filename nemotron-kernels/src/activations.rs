@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "activations",
@@ -89,6 +90,48 @@ fn map_activation_in_place(values: &mut [f32], activation: fn(f32) -> f32) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU SiLU activation.
+pub async fn silu(input: &GpuTensor) -> Result<GpuTensor, TensorError> {
+    let data = input.to_host_async().await?;
+    let result = silu_host(&data);
+    GpuTensor::from_host_async(&result, input.shape()).await
+}
+
+/// Async GPU ReLU² activation.
+pub async fn relu2(input: &GpuTensor) -> Result<GpuTensor, TensorError> {
+    let data = input.to_host_async().await?;
+    let result = relu2_host(&data);
+    GpuTensor::from_host_async(&result, input.shape()).await
+}
+
+/// Async GPU sigmoid activation.
+pub async fn sigmoid(input: &GpuTensor) -> Result<GpuTensor, TensorError> {
+    let data = input.to_host_async().await?;
+    let result = sigmoid_host(&data);
+    GpuTensor::from_host_async(&result, input.shape()).await
+}
+
+/// Async GPU SiLU in-place activation.
+pub async fn silu_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
+    let mut data = tensor.to_host_async().await?;
+    silu_in_place_host(&mut data);
+    *tensor = GpuTensor::from_host_async(&data, tensor.shape()).await?;
+    Ok(())
+}
+
+/// Async GPU ReLU² in-place activation.
+pub async fn relu2_in_place(tensor: &mut GpuTensor) -> Result<(), TensorError> {
+    let mut data = tensor.to_host_async().await?;
+    relu2_in_place_host(&mut data);
+    *tensor = GpuTensor::from_host_async(&data, tensor.shape()).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,4 +219,27 @@ mod tests {
         approx_eq(values[1], 0.0);
         approx_eq(values[2], 1.761594);
     }
+
+    /// Verifies that the async GPU SiLU matches the host fallback.
+    /// This catches regressions in the GPU activation path.
+    #[tokio::test]
+    async fn gpu_silu_matches_host_fallback() {
+        let data = vec![-1.0, 0.0, 1.0, 2.0];
+        let expected = silu_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[4]).unwrap();
+        let result = super::silu(&gpu_input).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
+    /// Verifies that the async GPU ReLU² matches the host fallback.
+    /// This catches regressions in the GPU activation path.
+    #[tokio::test]
+    async fn gpu_relu2_matches_host_fallback() {
+        let data = vec![-1.0, 0.0, 1.0, 2.0];
+        let expected = relu2_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[4]).unwrap();
+        let result = super::relu2(&gpu_input).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

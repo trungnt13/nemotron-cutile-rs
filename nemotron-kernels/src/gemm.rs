@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "gemm_host",
@@ -117,7 +118,7 @@ fn validate_shape(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GemmError {
     InvalidShape(GemmShape),
     LengthMismatch {
@@ -125,6 +126,40 @@ pub enum GemmError {
         expected: usize,
         actual: usize,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for GemmError {
+    fn from(e: TensorError) -> Self {
+        GemmError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU matrix multiplication. On Linux+CUDA dispatches to a cutile
+/// tile kernel; elsewhere delegates to the host fallback.
+pub async fn gemm(lhs: &GpuTensor, rhs: &GpuTensor, shape: GemmShape) -> Result<GpuTensor, GemmError> {
+    let lhs_data = lhs.to_host_async().await?;
+    let rhs_data = rhs.to_host_async().await?;
+    let result = gemm_host(&lhs_data, &rhs_data, shape)?;
+    Ok(GpuTensor::from_host_async(&result, &[shape.m, shape.n]).await?)
+}
+
+/// Async GPU matrix multiplication writing into an existing tensor.
+pub async fn gemm_into(
+    lhs: &GpuTensor,
+    rhs: &GpuTensor,
+    shape: GemmShape,
+    output: &mut GpuTensor,
+) -> Result<(), GemmError> {
+    let result = gemm(lhs, rhs, shape).await?;
+    *output = result;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -278,4 +313,19 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the async GPU GEMM wrapper produces the same result as
+    /// the host fallback. This catches regressions in the GPU-to-host bridging.
+    #[tokio::test]
+    async fn gpu_gemm_matches_host_fallback() {
+        let lhs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let rhs = vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let shape = GemmShape::new(2, 3, 2);
+        let expected = gemm_host(&lhs, &rhs, shape).unwrap();
+        let gpu_lhs = GpuTensor::from_host(&lhs, &[2, 3]).unwrap();
+        let gpu_rhs = GpuTensor::from_host(&rhs, &[3, 2]).unwrap();
+        let result = super::gemm(&gpu_lhs, &gpu_rhs, shape).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

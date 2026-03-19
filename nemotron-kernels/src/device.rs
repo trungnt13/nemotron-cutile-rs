@@ -5,6 +5,8 @@
 //! everywhere.
 
 use std::fmt;
+
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 use crate::tensor::TensorError;

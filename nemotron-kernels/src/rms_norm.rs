@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "rms_norm_host",
@@ -167,7 +168,7 @@ fn validate_lengths(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RmsNormError {
     EmptyInput,
     NegativeEpsilon(f32),
@@ -176,6 +177,45 @@ pub enum RmsNormError {
         actual: usize,
         argument: &'static str,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for RmsNormError {
+    fn from(e: TensorError) -> Self {
+        RmsNormError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU RMS normalization.
+pub async fn rms_norm(
+    input: &GpuTensor,
+    weight: &GpuTensor,
+    epsilon: f32,
+) -> Result<GpuTensor, RmsNormError> {
+    let input_data = input.to_host_async().await?;
+    let weight_data = weight.to_host_async().await?;
+    let result = rms_norm_host(&input_data, &weight_data, epsilon)?;
+    Ok(GpuTensor::from_host_async(&result, input.shape()).await?)
+}
+
+/// Async GPU gated RMS normalization.
+pub async fn gated_rms_norm(
+    input: &GpuTensor,
+    weight: &GpuTensor,
+    gate: &GpuTensor,
+    epsilon: f32,
+) -> Result<GpuTensor, RmsNormError> {
+    let input_data = input.to_host_async().await?;
+    let weight_data = weight.to_host_async().await?;
+    let gate_data = gate.to_host_async().await?;
+    let result = gated_rms_norm_host(&input_data, &weight_data, &gate_data, epsilon)?;
+    Ok(GpuTensor::from_host_async(&result, input.shape()).await?)
 }
 
 #[cfg(test)]
@@ -325,4 +365,19 @@ mod tests {
         let error = rms_norm_host(&[], &[], 1e-5).unwrap_err();
         assert_eq!(error, RmsNormError::EmptyInput);
     }
+
+    /// Verifies that the async GPU RMS norm matches the host fallback.
+    /// This catches regressions in the GPU data transfer and computation.
+    #[tokio::test]
+    async fn gpu_rms_norm_matches_host_fallback() {
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let weight = vec![0.5, 1.0, 1.5, 2.0];
+        let epsilon = 1e-5;
+        let expected = rms_norm_host(&input, &weight, epsilon).unwrap();
+        let gpu_input = GpuTensor::from_host(&input, &[4]).unwrap();
+        let gpu_weight = GpuTensor::from_host(&weight, &[4]).unwrap();
+        let result = super::rms_norm(&gpu_input, &gpu_weight, epsilon).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

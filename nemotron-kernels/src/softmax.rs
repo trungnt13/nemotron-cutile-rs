@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "softmax_host",
@@ -71,10 +72,32 @@ pub fn softmax_into_host(input: &[f32], output: &mut [f32]) -> Result<(), Softma
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SoftmaxError {
     LengthMismatch { input: usize, output: usize },
     ZeroPartition,
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for SoftmaxError {
+    fn from(e: TensorError) -> Self {
+        SoftmaxError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU softmax normalization.
+pub async fn softmax(input: &GpuTensor) -> Result<GpuTensor, SoftmaxError> {
+    let data = input.to_host_async().await.map_err(|e| SoftmaxError::DeviceError(e.to_string()))?;
+    let result = softmax_host(&data);
+    GpuTensor::from_host_async(&result, input.shape())
+        .await
+        .map_err(|e| SoftmaxError::DeviceError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -175,4 +198,16 @@ mod tests {
     fn softmax_handles_empty_input() {
         assert_eq!(softmax_host(&[]), Vec::<f32>::new());
     }
+
+    /// Verifies that the async GPU softmax matches the host fallback.
+    /// This catches regressions in the GPU data transfer path.
+    #[tokio::test]
+    async fn gpu_softmax_matches_host_fallback() {
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let expected = softmax_host(&data);
+        let gpu_input = GpuTensor::from_host(&data, &[4]).unwrap();
+        let result = super::softmax(&gpu_input).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

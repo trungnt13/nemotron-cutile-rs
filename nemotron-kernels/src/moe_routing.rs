@@ -1,4 +1,5 @@
 use crate::{activations::sigmoid_scalar, KernelStub};
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "moe_routing",
@@ -254,7 +255,7 @@ fn validate_shape(shape: MoeRoutingShape) -> Result<(), MoeRoutingError> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MoeRoutingError {
     InvalidShape(MoeRoutingShape),
     LengthMismatch {
@@ -262,6 +263,37 @@ pub enum MoeRoutingError {
         expected: usize,
         actual: usize,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for MoeRoutingError {
+    fn from(e: TensorError) -> Self {
+        MoeRoutingError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU MoE routing (sigmoid scoring with top-k selection).
+pub async fn moe_route(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    let data = scores.to_host_async().await?;
+    moe_route_host(&data, shape)
+}
+
+/// Async GPU MoE routing with softmax normalization.
+pub async fn moe_route_softmax(
+    scores: &GpuTensor,
+    shape: MoeRoutingShape,
+) -> Result<MoeRoutingOutput, MoeRoutingError> {
+    let data = scores.to_host_async().await?;
+    moe_route_softmax_host(&data, shape)
 }
 
 #[cfg(test)]
@@ -491,4 +523,18 @@ mod tests {
             MoeRoutingError::InvalidShape(MoeRoutingShape::new(1, 2, 0))
         );
     }
+
+    /// Verifies that the async GPU MoE routing matches the host fallback.
+    /// This catches regressions in the GPU routing path.
+    #[tokio::test]
+    async fn gpu_moe_route_matches_host_fallback() {
+        let scores = vec![0.1, 0.9, 0.4, 0.6];
+        let shape = MoeRoutingShape::new(2, 2, 1);
+        let expected = moe_route_host(&scores, shape).unwrap();
+        let gpu_scores = GpuTensor::from_host(&scores, &[2, 2]).unwrap();
+        let result = super::moe_route(&gpu_scores, shape).await.unwrap();
+        assert_eq!(result.indices, expected.indices);
+        assert_eq!(result.weights, expected.weights);
+    }
+
 }

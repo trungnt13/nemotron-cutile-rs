@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "conv1d",
@@ -133,7 +134,7 @@ fn validate_shape(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Conv1dError {
     InvalidShape(Conv1dShape),
     LengthMismatch {
@@ -141,6 +142,31 @@ pub enum Conv1dError {
         expected: usize,
         actual: usize,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for Conv1dError {
+    fn from(e: TensorError) -> Self {
+        Conv1dError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU depthwise causal 1D convolution.
+pub async fn depthwise_causal_conv1d(
+    input: &GpuTensor,
+    weights: &GpuTensor,
+    shape: Conv1dShape,
+) -> Result<GpuTensor, Conv1dError> {
+    let input_data = input.to_host_async().await?;
+    let weight_data = weights.to_host_async().await?;
+    let result = depthwise_causal_conv1d_host(&input_data, &weight_data, shape)?;
+    Ok(GpuTensor::from_host_async(&result, input.shape()).await?)
 }
 
 #[cfg(test)]
@@ -333,4 +359,20 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the async GPU conv1d matches the host fallback.
+    /// This catches regressions in the GPU convolution path.
+    #[tokio::test]
+    async fn gpu_conv1d_matches_host_fallback() {
+        let input = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let weights = vec![0.5, 1.0, 0.5, 1.0];
+        let shape = Conv1dShape::new(3, 2, 2);
+        let expected = depthwise_causal_conv1d_host(&input, &weights, shape).unwrap();
+        let gpu_input = GpuTensor::from_host(&input, &[3, 2]).unwrap();
+        let gpu_weights = GpuTensor::from_host(&weights, &[2, 2]).unwrap();
+        let result = super::depthwise_causal_conv1d(&gpu_input, &gpu_weights, shape)
+            .await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

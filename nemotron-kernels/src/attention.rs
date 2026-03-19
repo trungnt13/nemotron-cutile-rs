@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "attention",
@@ -359,7 +360,7 @@ fn score_offset(
         * shape.key_value_sequence_len
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttentionError {
     InvalidShape(AttentionShape),
     HeadCountMismatch {
@@ -382,6 +383,40 @@ pub enum AttentionError {
         query_index: usize,
         query_head: usize,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for AttentionError {
+    fn from(e: TensorError) -> Self {
+        AttentionError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU scaled dot-product attention.
+pub async fn scaled_dot_product_attention(
+    query: &GpuTensor,
+    key: &GpuTensor,
+    value: &GpuTensor,
+    shape: AttentionShape,
+    options: AttentionOptions,
+) -> Result<GpuTensor, AttentionError> {
+    let q = query.to_host_async().await?;
+    let k = key.to_host_async().await?;
+    let v = value.to_host_async().await?;
+    let result = scaled_dot_product_attention_host(&q, &k, &v, shape, options)?;
+    let output_shape = &[
+        shape.batch_size,
+        shape.query_sequence_len,
+        shape.query_head_count,
+        shape.head_dim,
+    ];
+    Ok(GpuTensor::from_host_async(&result, output_shape).await?)
 }
 
 #[cfg(test)]
@@ -588,4 +623,26 @@ mod tests {
 
         assert_eq!(error, AttentionError::InvalidScale(0.0));
     }
+
+    /// Verifies that the async GPU attention matches the host fallback.
+    /// This catches regressions in the GPU attention path.
+    #[tokio::test]
+    async fn gpu_attention_matches_host_fallback() {
+        let shape = AttentionShape::new(1, 1, 3, 1, 1, 2);
+        let options = AttentionOptions::default();
+        let query = vec![1.0, 0.0];
+        let key = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let value = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let expected = scaled_dot_product_attention_host(
+            &query, &key, &value, shape, options,
+        ).unwrap();
+        let gpu_q = GpuTensor::from_host(&query, &[1, 1, 1, 2]).unwrap();
+        let gpu_k = GpuTensor::from_host(&key, &[1, 3, 1, 2]).unwrap();
+        let gpu_v = GpuTensor::from_host(&value, &[1, 3, 1, 2]).unwrap();
+        let result = super::scaled_dot_product_attention(
+            &gpu_q, &gpu_k, &gpu_v, shape, options,
+        ).await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

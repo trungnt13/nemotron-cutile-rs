@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "embedding",
@@ -162,7 +163,7 @@ fn validate_shape(table: &[f32], shape: EmbeddingShape) -> Result<(), EmbeddingE
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EmbeddingError {
     InvalidShape(EmbeddingShape),
     LengthMismatch {
@@ -174,6 +175,31 @@ pub enum EmbeddingError {
         token_id: usize,
         vocab_size: usize,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for EmbeddingError {
+    fn from(e: TensorError) -> Self {
+        EmbeddingError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU embedding lookup.
+pub async fn embedding_lookup(
+    table: &GpuTensor,
+    token_ids: &[usize],
+    shape: EmbeddingShape,
+) -> Result<GpuTensor, EmbeddingError> {
+    let table_data = table.to_host_async().await?;
+    let result = embedding_lookup_host(&table_data, token_ids, shape)?;
+    let output_shape = &[token_ids.len(), shape.hidden_size];
+    Ok(GpuTensor::from_host_async(&result, output_shape).await?)
 }
 
 #[cfg(test)]
@@ -341,4 +367,19 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the async GPU embedding lookup matches the host fallback.
+    /// This catches regressions in the GPU embedding path.
+    #[tokio::test]
+    async fn gpu_embedding_matches_host_fallback() {
+        let table = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let shape = EmbeddingShape::new(3, 2);
+        let token_ids = &[0, 2, 1];
+        let expected = embedding_lookup_host(&table, token_ids, shape).unwrap();
+        let gpu_table = GpuTensor::from_host(&table, &[3, 2]).unwrap();
+        let result = super::embedding_lookup(&gpu_table, token_ids, shape)
+            .await.unwrap();
+        assert_eq!(result.to_host(), expected);
+    }
+
 }

@@ -1,4 +1,5 @@
 use crate::KernelStub;
+use crate::tensor::{GpuTensor, TensorError};
 
 pub const SPEC: KernelStub = KernelStub {
     name: "quantize",
@@ -195,7 +196,7 @@ fn dequantize_scalar(code: u8, params: Int4QuantizationParams) -> f32 {
     (f32::from(code) - f32::from(params.zero_point)) * params.scale
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum QuantizeError {
     InvalidParams(Int4QuantizationParams),
     Int4OutOfRange(u8),
@@ -208,6 +209,31 @@ pub enum QuantizeError {
         index: usize,
         value: f32,
     },
+    DeviceError(String),
+}
+
+
+impl From<TensorError> for QuantizeError {
+    fn from(e: TensorError) -> Self {
+        QuantizeError::DeviceError(e.to_string())
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU INT4 dequantization.
+pub async fn dequantize_int4(
+    packed: &[u8],
+    value_count: usize,
+    params: Int4QuantizationParams,
+) -> Result<GpuTensor, QuantizeError> {
+    let result = dequantize_int4_host(packed, value_count, params)?;
+    GpuTensor::from_host_async(&result, &[value_count])
+        .await
+        .map_err(|e| QuantizeError::DeviceError(e.to_string()))
 }
 
 #[cfg(test)]
