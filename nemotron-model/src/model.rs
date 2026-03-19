@@ -546,4 +546,33 @@ mod tests {
             ModelForwardError::MissingRuntime
         );
     }
+
+    /// Verifies that GPU forward matches host forward for a tiny runtime.
+    ///
+    /// This catches regressions in the async GPU forward pipeline (embedding → blocks → norm → lm_head).
+    #[tokio::test]
+    async fn gpu_forward_matches_host() {
+        let mut config = ModelConfig::default();
+        config.hidden_size = 2;
+        config.vocab_size = 2;
+        config.num_hidden_layers = 0;
+        config.hybrid_override_pattern.clear();
+        let runtime = ModelRuntime {
+            embeddings: EmbeddingTable::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap(),
+            blocks: Vec::new(),
+            final_norm_weight: vec![1.0, 1.0],
+            lm_head: identity_projection(2),
+        };
+        let model = NemotronModel::with_runtime(config, runtime);
+
+        let host_output = model.forward_tokens(&[0, 1]).unwrap();
+        let gpu_output = model.forward_tokens_gpu(&[0, 1]).await.unwrap();
+
+        approx_eq_slice(&gpu_output.hidden_states, &host_output.hidden_states);
+        approx_eq_slice(&gpu_output.logits, &host_output.logits);
+
+        let host_pred = model.predict_next_token(&[0, 1]).unwrap();
+        let gpu_pred = model.predict_next_token_gpu(&[0, 1]).await.unwrap();
+        assert_eq!(gpu_pred, host_pred);
+    }
 }

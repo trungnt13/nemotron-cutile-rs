@@ -398,4 +398,23 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the GPU block forward path matches the host-fallback output.
+    ///
+    /// This catches regressions in the async GPU data transfer path for NemotronBlock.
+    #[tokio::test]
+    async fn gpu_block_forward_matches_host() {
+        use nemotron_kernels::tensor::GpuTensor;
+        let mlp = MlpLayer::new_dense_relu2(2, 2, vec![1.0; 4], None, vec![1.0; 4], None).unwrap();
+        let block = NemotronBlock::new(2, vec![1.0, 1.0], 1e-5, BlockMixer::Mlp(mlp)).unwrap();
+        let hidden = [1.0_f32, 0.5];
+
+        let host_result = block.forward(&hidden, 1, None).unwrap();
+
+        let gpu_input = GpuTensor::from_host(&hidden, &[1, 2]).unwrap();
+        let gpu_result = block.forward_gpu(&gpu_input, 1, None).await.unwrap();
+        let gpu_host = gpu_result.to_host();
+
+        approx_eq_slice(&gpu_host, &host_result);
+    }
 }

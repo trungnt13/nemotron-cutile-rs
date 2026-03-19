@@ -859,4 +859,23 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the GPU Mamba2 forward path matches the host-fallback output.
+    ///
+    /// This catches regressions in the async GPU data transfer path for Mamba2 mixer.
+    #[tokio::test]
+    async fn gpu_mamba2_forward_matches_host() {
+        use nemotron_kernels::tensor::GpuTensor;
+        let mixer = simple_mixer(2);
+        let hidden = [1.0_f32, 0.5];
+        let shape = Mamba2ForwardShape::new(1, 2);
+
+        let host_result = mixer.forward(&hidden, shape, None).unwrap();
+
+        let gpu_input = GpuTensor::from_host(&hidden, &[2, 1]).unwrap();
+        let gpu_result = mixer.forward_gpu(&gpu_input, shape, None).await.unwrap();
+        let gpu_host = gpu_result.to_host();
+
+        approx_eq_slice(&gpu_host, &host_result);
+    }
 }

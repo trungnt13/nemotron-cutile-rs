@@ -565,4 +565,38 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the GPU self-attention path matches the host-fallback output.
+    ///
+    /// This catches regressions in the async GPU data transfer path for attention layers.
+    #[tokio::test]
+    async fn gpu_self_attention_matches_host() {
+        use nemotron_kernels::tensor::GpuTensor;
+        let layer = AttentionLayer::new(
+            2, 1, 1, 2,
+            identity_projection(2),
+            identity_projection(2),
+            identity_projection(2),
+            identity_projection(2),
+        )
+        .unwrap();
+        let hidden_states = [1.0, 0.0, 0.0, 1.0];
+        let options = AttentionOptions {
+            softmax_scale: Some(1.0),
+            ..AttentionOptions::default()
+        };
+
+        let host_result = layer
+            .forward_self_attention(&hidden_states, 1, 2, options)
+            .unwrap();
+
+        let gpu_input = GpuTensor::from_host(&hidden_states, &[2, 2]).unwrap();
+        let gpu_result = layer
+            .forward_self_attention_gpu(&gpu_input, 1, 2, options)
+            .await
+            .unwrap();
+        let gpu_host = gpu_result.to_host();
+
+        approx_eq_slice(&gpu_host, &host_result);
+    }
 }

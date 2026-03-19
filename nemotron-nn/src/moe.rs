@@ -493,4 +493,28 @@ mod tests {
             }
         );
     }
+
+    /// Verifies that the GPU MoE forward path matches the host-fallback output.
+    ///
+    /// This catches regressions in the async GPU data transfer path for MoE layers.
+    #[tokio::test]
+    async fn gpu_moe_forward_matches_host() {
+        use nemotron_kernels::tensor::GpuTensor;
+        let layer = MoeLayer::new(
+            MoeShape::new(1, 3, 2),
+            dense_projection(1, 3, vec![0.0, 0.0, 0.0], Some(vec![0.2, 2.0, 1.0])),
+            vec![scaling_mlp(1.0), scaling_mlp(2.0), scaling_mlp(3.0)],
+            Some(scaling_mlp(0.5)),
+        )
+        .unwrap();
+        let input = [1.0_f32];
+
+        let host_result = layer.forward(&input, 1).unwrap();
+
+        let gpu_input = GpuTensor::from_host(&input, &[1, 1]).unwrap();
+        let gpu_result = layer.forward_gpu(&gpu_input, 1).await.unwrap();
+        let gpu_host = gpu_result.to_host();
+
+        approx_eq_slice(&gpu_host, &host_result);
+    }
 }
