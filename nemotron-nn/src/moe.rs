@@ -1,6 +1,7 @@
 use crate::linear::{LinearError, LinearProjection, LinearShape, DENSE_F32_HOST};
 use crate::{LayerStub, MlpError, MlpLayer, MlpShape};
 use nemotron_kernels::moe_routing::{moe_route_host, MoeRoutingError, MoeRoutingShape};
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -246,6 +247,19 @@ impl MoeLayer {
 
         Ok(())
     }
+
+    /// Async GPU MoE forward. Delegates to host fallback via data transfer.
+    pub async fn forward_gpu(
+        &self,
+        input: &GpuTensor,
+        row_count: usize,
+    ) -> Result<GpuTensor, MoeError> {
+        let data = input.to_host_async().await.map_err(|e| MoeError::DeviceError(e.to_string()))?;
+        let result = self.forward(&data, row_count)?;
+        GpuTensor::from_host_async(&result, &[row_count, self.shape.hidden_dim])
+            .await
+            .map_err(|e| MoeError::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_shape(shape: MoeShape) -> Result<(), MoeError> {
@@ -311,6 +325,7 @@ pub enum MoeError {
         source: MlpError,
     },
     SharedExpert(MlpError),
+    DeviceError(String),
 }
 
 impl fmt::Display for MoeError {
@@ -357,6 +372,7 @@ impl fmt::Display for MoeError {
                 source,
             } => write!(f, "expert {expert_index} failed: {source}"),
             Self::SharedExpert(source) => write!(f, "shared expert failed: {source}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

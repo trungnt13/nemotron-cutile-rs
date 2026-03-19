@@ -4,6 +4,7 @@ use crate::{
 };
 use nemotron_kernels::attention::AttentionOptions;
 use nemotron_kernels::rms_norm::{rms_norm_host, RmsNormError};
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -154,6 +155,20 @@ impl NemotronBlock {
 
         Ok(())
     }
+
+    /// Async GPU block forward. Delegates to host fallback via data transfer.
+    pub async fn forward_gpu(
+        &self,
+        hidden_states: &GpuTensor,
+        row_count: usize,
+        cache: Option<&mut LayerCache>,
+    ) -> Result<GpuTensor, BlockError> {
+        let data = hidden_states.to_host_async().await.map_err(|e| BlockError::DeviceError(e.to_string()))?;
+        let result = self.forward(&data, row_count, cache)?;
+        GpuTensor::from_host_async(&result, &[row_count, self.hidden_size])
+            .await
+            .map_err(|e| BlockError::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_mixer_hidden_size(mixer: &BlockMixer, hidden_size: usize) -> Result<(), BlockError> {
@@ -244,6 +259,7 @@ pub enum BlockError {
     Mamba(Mamba2Error),
     Mlp(MlpError),
     Moe(MoeError),
+    DeviceError(String),
 }
 
 impl fmt::Display for BlockError {
@@ -280,6 +296,7 @@ impl fmt::Display for BlockError {
             Self::Mamba(source) => write!(f, "mamba failed: {source}"),
             Self::Mlp(source) => write!(f, "mlp failed: {source}"),
             Self::Moe(source) => write!(f, "moe failed: {source}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

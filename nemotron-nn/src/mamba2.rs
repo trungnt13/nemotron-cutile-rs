@@ -3,6 +3,7 @@ use nemotron_kernels::activations::silu_in_place_host;
 use nemotron_kernels::conv1d::{depthwise_causal_conv1d_host, Conv1dError, Conv1dShape};
 use nemotron_kernels::rms_norm::{gated_rms_norm_host, RmsNormError};
 use nemotron_kernels::ssm::{selective_scan_host, SelectiveScanParams, SelectiveScanShape, SsmError};
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -389,6 +390,20 @@ impl Mamba2Mixer {
     pub const fn conv_kernel_size(&self) -> usize {
         self.conv_kernel_size
     }
+
+    /// Async GPU Mamba2 forward. Delegates to host fallback via data transfer.
+    pub async fn forward_gpu(
+        &self,
+        hidden_states: &GpuTensor,
+        shape: Mamba2ForwardShape,
+        cache: Option<&mut Mamba2Cache>,
+    ) -> Result<GpuTensor, Mamba2Error> {
+        let data = hidden_states.to_host_async().await.map_err(|e| Mamba2Error::DeviceError(e.to_string()))?;
+        let result = self.forward(&data, shape, cache)?;
+        GpuTensor::from_host_async(&result, &[shape.row_count(), self.hidden_size])
+            .await
+            .map_err(|e| Mamba2Error::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_mamba_dims(
@@ -599,6 +614,7 @@ pub enum Mamba2Error {
     Conv1d(Conv1dError),
     Ssm(SsmError),
     RmsNorm(RmsNormError),
+    DeviceError(String),
 }
 
 impl fmt::Display for Mamba2Error {
@@ -650,6 +666,7 @@ impl fmt::Display for Mamba2Error {
             Self::Conv1d(source) => write!(f, "conv1d failed: {source:?}"),
             Self::Ssm(source) => write!(f, "ssm failed: {source:?}"),
             Self::RmsNorm(source) => write!(f, "rms norm failed: {source:?}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

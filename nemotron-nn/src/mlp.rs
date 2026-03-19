@@ -1,6 +1,7 @@
 use crate::linear::{LinearError, LinearProjection, LinearShape, LinearWeightKind, DENSE_F32_HOST};
 use crate::LayerStub;
 use nemotron_kernels::activations::{relu2_in_place_host, ActivationKernel, RELU2};
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -208,6 +209,19 @@ impl MlpLayer {
 
         Ok(())
     }
+
+    /// Async GPU MLP forward. Delegates to host fallback via data transfer.
+    pub async fn forward_gpu(
+        &self,
+        input: &GpuTensor,
+        row_count: usize,
+    ) -> Result<GpuTensor, MlpError> {
+        let data = input.to_host_async().await.map_err(|e| MlpError::DeviceError(e.to_string()))?;
+        let result = self.forward(&data, row_count)?;
+        GpuTensor::from_host_async(&result, &[row_count, self.shape.hidden_dim])
+            .await
+            .map_err(|e| MlpError::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_mlp_shape(shape: MlpShape) -> Result<(), MlpError> {
@@ -239,6 +253,7 @@ pub enum MlpError {
     },
     UpProjection(LinearError),
     DownProjection(LinearError),
+    DeviceError(String),
 }
 
 impl fmt::Display for MlpError {
@@ -283,6 +298,7 @@ impl fmt::Display for MlpError {
             ),
             Self::UpProjection(error) => write!(f, "up projection failed: {error}"),
             Self::DownProjection(error) => write!(f, "down projection failed: {error}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

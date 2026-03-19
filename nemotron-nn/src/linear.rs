@@ -3,6 +3,7 @@ use nemotron_kernels::gemm::{gemm_into_host, GemmError, GemmShape};
 use nemotron_kernels::quantize::{
     dequantize_int4_host, packed_int4_len, validate_int4_params, Int4QuantizationParams, QuantizeError,
 };
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -338,6 +339,19 @@ impl LinearProjection {
 
         Ok(())
     }
+
+    /// Async GPU projection. Delegates to host fallback via data transfer.
+    pub async fn project_gpu(
+        &self,
+        input: &GpuTensor,
+        row_count: usize,
+    ) -> Result<GpuTensor, LinearError> {
+        let data = input.to_host_async().await.map_err(|e| LinearError::DeviceError(e.to_string()))?;
+        let result = self.project(&data, row_count)?;
+        GpuTensor::from_host_async(&result, &[row_count, self.output_dim()])
+            .await
+            .map_err(|e| LinearError::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_projection_shape(shape: LinearShape) -> Result<(), LinearError> {
@@ -363,6 +377,7 @@ pub enum LinearError {
     },
     Gemm(GemmError),
     Quantize(QuantizeError),
+    DeviceError(String),
 }
 
 impl fmt::Display for LinearError {
@@ -394,6 +409,7 @@ impl fmt::Display for LinearError {
             ),
             Self::Gemm(error) => write!(f, "gemm_host failed: {error:?}"),
             Self::Quantize(error) => write!(f, "quantization failed: {error:?}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

@@ -3,6 +3,7 @@ use nemotron_kernels::attention::{
     scaled_dot_product_attention_host, AttentionError, AttentionOptions, AttentionShape,
     GROUPED_QUERY_ATTENTION,
 };
+use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
 
@@ -207,6 +208,40 @@ impl AttentionLayer {
                 source,
             })
     }
+
+    /// Async GPU self-attention. Delegates to host fallback via data transfer.
+    pub async fn forward_self_attention_gpu(
+        &self,
+        hidden_states: &GpuTensor,
+        batch_size: usize,
+        sequence_len: usize,
+        options: AttentionOptions,
+    ) -> Result<GpuTensor, AttentionLayerError> {
+        self.forward_gpu(
+            hidden_states,
+            hidden_states,
+            AttentionForwardShape::new(batch_size, sequence_len, sequence_len),
+            options,
+        )
+        .await
+    }
+
+    /// Async GPU attention forward. Delegates to host fallback via data transfer.
+    pub async fn forward_gpu(
+        &self,
+        query_states: &GpuTensor,
+        key_value_states: &GpuTensor,
+        shape: AttentionForwardShape,
+        options: AttentionOptions,
+    ) -> Result<GpuTensor, AttentionLayerError> {
+        let q_host = query_states.to_host_async().await.map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
+        let kv_host = key_value_states.to_host_async().await.map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
+        let result = self.forward(&q_host, &kv_host, shape, options)?;
+        let out_rows = shape.query_row_count();
+        GpuTensor::from_host_async(&result, &[out_rows, self.hidden_size])
+            .await
+            .map_err(|e| AttentionLayerError::DeviceError(e.to_string()))
+    }
 }
 
 fn validate_head_shape(
@@ -309,6 +344,7 @@ pub enum AttentionLayerError {
         source: LinearError,
     },
     Attention(AttentionError),
+    DeviceError(String),
 }
 
 impl fmt::Display for AttentionLayerError {
@@ -357,6 +393,7 @@ impl fmt::Display for AttentionLayerError {
                 write!(f, "{projection} failed: {source}")
             }
             Self::Attention(source) => write!(f, "attention kernel failed: {source:?}"),
+            Self::DeviceError(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

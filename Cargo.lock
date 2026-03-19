@@ -1164,6 +1164,7 @@ name = "nemotron-nn"
 version = "0.1.0"
 dependencies = [
  "nemotron-kernels",
+ "tokio",
 ]
 
 [[package]]
