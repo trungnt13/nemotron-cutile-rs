@@ -234,8 +234,14 @@ impl AttentionLayer {
         shape: AttentionForwardShape,
         options: AttentionOptions,
     ) -> Result<GpuTensor, AttentionLayerError> {
-        let q_host = query_states.to_host_async().await.map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
-        let kv_host = key_value_states.to_host_async().await.map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
+        let q_host = query_states
+            .to_host_async()
+            .await
+            .map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
+        let kv_host = key_value_states
+            .to_host_async()
+            .await
+            .map_err(|e| AttentionLayerError::DeviceError(e.to_string()))?;
         let result = self.forward(&q_host, &kv_host, shape, options)?;
         let out_rows = shape.query_row_count();
         GpuTensor::from_host_async(&result, &[out_rows, self.hidden_size])
@@ -573,7 +579,10 @@ mod tests {
     async fn gpu_self_attention_matches_host() {
         use nemotron_kernels::tensor::GpuTensor;
         let layer = AttentionLayer::new(
-            2, 1, 1, 2,
+            2,
+            1,
+            1,
+            2,
             identity_projection(2),
             identity_projection(2),
             identity_projection(2),

@@ -5,7 +5,7 @@
 Rust inference framework for **Nemotron-3-Nano-30B-A3B** — a 52-layer hybrid model with 23 Mamba-2 mixers, 23 Mixture-of-Experts (MoE) layers, and 6 Grouped-Query Attention (GQA) blocks. The goal is output parity with the vLLM reference implementation (`stelterlab/NVIDIA-Nemotron-3-Nano-30B-A3B-AWQ`), targeting INT4 (AWQ) quantization on an RTX 3090.
 
 Key design decisions:
-- **Host-fallback first** — all 10 kernels are pure-Rust CPU implementations. GPU kernels via `cutile-rs` are planned but not yet implemented.
+- **Host-fallback first** — all 10 kernels are pure-Rust CPU implementations. `cutile-rs` currently provides GPU tensor/device scaffolding and async wrapper paths, while real GPU compute kernels are still planned.
 - **Kernel parity before model parity** — validate individual kernel outputs against vLLM fixtures before attempting full-model inference.
 - **MoE uses sigmoid routing with bias correction**, not softmax — verified from the reference, not assumed from naming.
 
@@ -13,15 +13,16 @@ Key design decisions:
 
 ```bash
 cargo build --workspace          # build all 5 crates
-cargo test  --workspace          # run all unit + integration tests (~167 tests)
-cargo run -p nemotron-validate   # run kernel + E2E validation against fixtures (9/9 pass)
+cargo test  --workspace          # run all unit + integration tests (~204 passing, 1 ignored locally)
+cargo run -p nemotron-validate   # run kernel + E2E validation plus GPU-wrapper fixture checks (9/9 host, 7/7 GPU)
+cargo run -p nemotron-validate -- benchmark data/reference_kernels data/reference_outputs
 cargo run -p nemotron-cli -- "Hello, world!"  # generation preview
 ```
 
 Toolchain requirements:
 - Rust edition 2021, MSRV **1.85**
 - Workspace resolver `"2"`
-- `cutile` is a git dependency (`NVlabs/cutile-rs`) — present in `Cargo.toml` but not yet used in any kernel
+- `cutile` is a git dependency (`NVlabs/cutile-rs`) — used for Linux-only tensor/device scaffolding and async wrapper paths; kernel math still delegates to host today
 
 Prefer workspace-level dependencies in the root `Cargo.toml` to keep versions consistent across crates. Ask before adding new workspace dependencies.
 
@@ -112,9 +113,12 @@ When adding a new kernel or layer:
 | Host-fallback kernels | ✅ 10/10 implemented | Pure Rust, all pass validation |
 | NN layers | ✅ 7/7 implemented | Compose kernels correctly |
 | Model runtime | ✅ Working | Config, tokenizer, weights, generation |
-| Kernel validation | ✅ 9/9 pass | Against vLLM reference fixtures |
-| Unit tests | ✅ ~167 passing | All documented with `///` comments |
-| GPU kernels (cutile) | ⏳ Not started | `cutile` dep exists but unused |
+| Kernel validation | ✅ 9/9 pass | Host fixture validation against bundled reference outputs |
+| GPU wrapper validation | ✅ 7/7 pass | Covers every bundled kernel fixture through async GPU wrappers |
+| Workspace tests | ✅ ~204 passing locally | Includes crate tests + integration tests; 1 doc test remains ignored |
+| GPU scaffolding (cutile) | ✅ Implemented | `GpuTensor`, `GpuDevice`, async kernel/nn/model wrapper paths compile and run on Linux/macOS |
+| Real cutile compute kernels | ⏳ Not started | Current wrapper math still delegates to host kernels after D2H/H2D transfer |
+| Benchmark mode | ✅ Local comparison mode | `nemotron-validate benchmark ...` reports host vs GPU-wrapper timing and parity |
 | Full checkpoint loading | ⏳ Pending | Needs real AWQ model weights |
 | Layer-level validation | 🚫 Blocked | vLLM internals incompatible with fixture extraction |
 | CI/CD | ❌ None | No GitHub Actions — all testing is local |

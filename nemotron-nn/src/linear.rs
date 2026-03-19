@@ -1,7 +1,8 @@
 use crate::LayerStub;
 use nemotron_kernels::gemm::{gemm_into_host, GemmError, GemmShape};
 use nemotron_kernels::quantize::{
-    dequantize_int4_host, packed_int4_len, validate_int4_params, Int4QuantizationParams, QuantizeError,
+    dequantize_int4_host, packed_int4_len, validate_int4_params, Int4QuantizationParams,
+    QuantizeError,
 };
 use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
@@ -346,7 +347,10 @@ impl LinearProjection {
         input: &GpuTensor,
         row_count: usize,
     ) -> Result<GpuTensor, LinearError> {
-        let data = input.to_host_async().await.map_err(|e| LinearError::DeviceError(e.to_string()))?;
+        let data = input
+            .to_host_async()
+            .await
+            .map_err(|e| LinearError::DeviceError(e.to_string()))?;
         let result = self.project(&data, row_count)?;
         GpuTensor::from_host_async(&result, &[row_count, self.output_dim()])
             .await

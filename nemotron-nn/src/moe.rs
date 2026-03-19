@@ -254,7 +254,10 @@ impl MoeLayer {
         input: &GpuTensor,
         row_count: usize,
     ) -> Result<GpuTensor, MoeError> {
-        let data = input.to_host_async().await.map_err(|e| MoeError::DeviceError(e.to_string()))?;
+        let data = input
+            .to_host_async()
+            .await
+            .map_err(|e| MoeError::DeviceError(e.to_string()))?;
         let result = self.forward(&data, row_count)?;
         GpuTensor::from_host_async(&result, &[row_count, self.shape.hidden_dim])
             .await

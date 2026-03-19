@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "conv1d",
@@ -145,13 +145,11 @@ pub enum Conv1dError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for Conv1dError {
     fn from(e: TensorError) -> Self {
         Conv1dError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -205,7 +203,8 @@ mod tests {
     fn applies_single_channel_causal_filter() {
         let input = [1.0, 2.0, 3.0, 4.0];
         let weights = [2.0, 1.0];
-        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(4, 1, 2)).unwrap();
+        let output =
+            depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(4, 1, 2)).unwrap();
 
         approx_eq_slice(&output, &[1.0, 4.0, 7.0, 10.0]);
     }
@@ -225,7 +224,8 @@ mod tests {
             2.0, -1.0, //
         ];
 
-        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 2)).unwrap();
+        let output =
+            depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 2)).unwrap();
 
         approx_eq_slice(
             &output,
@@ -249,7 +249,8 @@ mod tests {
         ];
         let weights = [2.0, -0.5];
 
-        let output = depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 1)).unwrap();
+        let output =
+            depthwise_causal_conv1d_host(&input, &weights, Conv1dShape::new(3, 2, 1)).unwrap();
 
         approx_eq_slice(
             &output,
@@ -287,7 +288,8 @@ mod tests {
     /// This catches panics on empty input slices.
     #[test]
     fn empty_sequence_produces_empty_output() {
-        let output = depthwise_causal_conv1d_host(&[], &[1.0, 2.0], Conv1dShape::new(0, 1, 2)).unwrap();
+        let output =
+            depthwise_causal_conv1d_host(&[], &[1.0, 2.0], Conv1dShape::new(0, 1, 2)).unwrap();
         assert!(output.is_empty());
     }
 
@@ -305,8 +307,8 @@ mod tests {
     /// This catches missing input length validation.
     #[test]
     fn rejects_input_length_mismatch() {
-        let error =
-            depthwise_causal_conv1d_host(&[1.0], &[1.0, 2.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
+        let error = depthwise_causal_conv1d_host(&[1.0], &[1.0, 2.0], Conv1dShape::new(2, 1, 2))
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -323,8 +325,8 @@ mod tests {
     /// This catches missing weight length validation.
     #[test]
     fn rejects_weight_length_mismatch() {
-        let error =
-            depthwise_causal_conv1d_host(&[1.0, 2.0], &[1.0], Conv1dShape::new(2, 1, 2)).unwrap_err();
+        let error = depthwise_causal_conv1d_host(&[1.0, 2.0], &[1.0], Conv1dShape::new(2, 1, 2))
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -371,9 +373,9 @@ mod tests {
         let gpu_input = GpuTensor::from_host(&input, &[3, 2]).unwrap();
         let gpu_weights = GpuTensor::from_host(&weights, &[2, 2]).unwrap();
         let result = super::depthwise_causal_conv1d(&gpu_input, &gpu_weights, shape)
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(result.shape(), gpu_input.shape());
         assert_eq!(result.to_host(), expected);
     }
-
 }

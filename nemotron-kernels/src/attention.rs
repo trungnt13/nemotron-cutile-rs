@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "attention",
@@ -386,13 +386,11 @@ pub enum AttentionError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for AttentionError {
     fn from(e: TensorError) -> Self {
         AttentionError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -633,17 +631,15 @@ mod tests {
         let query = vec![1.0, 0.0];
         let key = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let value = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let expected = scaled_dot_product_attention_host(
-            &query, &key, &value, shape, options,
-        ).unwrap();
+        let expected =
+            scaled_dot_product_attention_host(&query, &key, &value, shape, options).unwrap();
         let gpu_q = GpuTensor::from_host(&query, &[1, 1, 1, 2]).unwrap();
         let gpu_k = GpuTensor::from_host(&key, &[1, 3, 1, 2]).unwrap();
         let gpu_v = GpuTensor::from_host(&value, &[1, 3, 1, 2]).unwrap();
-        let result = super::scaled_dot_product_attention(
-            &gpu_q, &gpu_k, &gpu_v, shape, options,
-        ).await.unwrap();
+        let result = super::scaled_dot_product_attention(&gpu_q, &gpu_k, &gpu_v, shape, options)
+            .await
+            .unwrap();
         assert_eq!(result.shape(), &[1, 1, 1, 2]);
         assert_eq!(result.to_host(), expected);
     }
-
 }

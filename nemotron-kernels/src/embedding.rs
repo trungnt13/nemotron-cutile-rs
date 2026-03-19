@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "embedding",
@@ -178,13 +178,11 @@ pub enum EmbeddingError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for EmbeddingError {
     fn from(e: TensorError) -> Self {
         EmbeddingError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -234,7 +232,8 @@ mod tests {
     /// This catches off-by-one errors in the row offset calculation.
     #[test]
     fn looks_up_single_token() {
-        let output = embedding_lookup_token_host(&sample_table(), 2, EmbeddingShape::new(4, 3)).unwrap();
+        let output =
+            embedding_lookup_token_host(&sample_table(), 2, EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![2.0, 2.1, 2.2]);
     }
 
@@ -243,7 +242,8 @@ mod tests {
     /// This catches indexing errors when writing multiple rows to the output.
     #[test]
     fn looks_up_multiple_tokens() {
-        let output = embedding_lookup_host(&sample_table(), &[3, 1], EmbeddingShape::new(4, 3)).unwrap();
+        let output =
+            embedding_lookup_host(&sample_table(), &[3, 1], EmbeddingShape::new(4, 3)).unwrap();
         assert_eq!(output, vec![3.0, 3.1, 3.2, 1.0, 1.1, 1.2]);
     }
 
@@ -278,7 +278,8 @@ mod tests {
     /// This catches panics on zero-length inputs.
     #[test]
     fn empty_token_ids_produce_empty_output() {
-        let output = embedding_lookup_host(&sample_table(), &[], EmbeddingShape::new(4, 3)).unwrap();
+        let output =
+            embedding_lookup_host(&sample_table(), &[], EmbeddingShape::new(4, 3)).unwrap();
         assert!(output.is_empty());
     }
 
@@ -287,7 +288,8 @@ mod tests {
     /// This catches missing dimension validation.
     #[test]
     fn rejects_invalid_shape() {
-        let error = embedding_lookup_host(&sample_table(), &[0], EmbeddingShape::new(0, 3)).unwrap_err();
+        let error =
+            embedding_lookup_host(&sample_table(), &[0], EmbeddingShape::new(0, 3)).unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::InvalidShape(EmbeddingShape::new(0, 3))
@@ -299,8 +301,8 @@ mod tests {
     /// This catches missing table length validation.
     #[test]
     fn rejects_table_length_mismatch() {
-        let error =
-            embedding_lookup_host(&sample_table()[..11], &[0], EmbeddingShape::new(4, 3)).unwrap_err();
+        let error = embedding_lookup_host(&sample_table()[..11], &[0], EmbeddingShape::new(4, 3))
+            .unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::LengthMismatch {
@@ -339,7 +341,8 @@ mod tests {
     /// This catches off-by-one in the token ID bounds check.
     #[test]
     fn rejects_out_of_range_token() {
-        let error = embedding_lookup_host(&sample_table(), &[4], EmbeddingShape::new(4, 3)).unwrap_err();
+        let error =
+            embedding_lookup_host(&sample_table(), &[4], EmbeddingShape::new(4, 3)).unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::TokenOutOfRange {
@@ -355,9 +358,13 @@ mod tests {
     #[test]
     fn rejects_single_token_output_length_mismatch() {
         let mut output = [0.0; 2];
-        let error =
-            embedding_lookup_token_into_host(&sample_table(), 1, EmbeddingShape::new(4, 3), &mut output)
-                .unwrap_err();
+        let error = embedding_lookup_token_into_host(
+            &sample_table(),
+            1,
+            EmbeddingShape::new(4, 3),
+            &mut output,
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             EmbeddingError::LengthMismatch {
@@ -378,9 +385,9 @@ mod tests {
         let expected = embedding_lookup_host(&table, token_ids, shape).unwrap();
         let gpu_table = GpuTensor::from_host(&table, &[3, 2]).unwrap();
         let result = super::embedding_lookup(&gpu_table, token_ids, shape)
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(result.shape(), &[3, 2]);
         assert_eq!(result.to_host(), expected);
     }
-
 }

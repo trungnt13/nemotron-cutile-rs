@@ -163,7 +163,10 @@ impl NemotronBlock {
         row_count: usize,
         cache: Option<&mut LayerCache>,
     ) -> Result<GpuTensor, BlockError> {
-        let data = hidden_states.to_host_async().await.map_err(|e| BlockError::DeviceError(e.to_string()))?;
+        let data = hidden_states
+            .to_host_async()
+            .await
+            .map_err(|e| BlockError::DeviceError(e.to_string()))?;
         let result = self.forward(&data, row_count, cache)?;
         GpuTensor::from_host_async(&result, &[row_count, self.hidden_size])
             .await

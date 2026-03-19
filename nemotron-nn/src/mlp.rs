@@ -216,7 +216,10 @@ impl MlpLayer {
         input: &GpuTensor,
         row_count: usize,
     ) -> Result<GpuTensor, MlpError> {
-        let data = input.to_host_async().await.map_err(|e| MlpError::DeviceError(e.to_string()))?;
+        let data = input
+            .to_host_async()
+            .await
+            .map_err(|e| MlpError::DeviceError(e.to_string()))?;
         let result = self.forward(&data, row_count)?;
         GpuTensor::from_host_async(&result, &[row_count, self.shape.hidden_dim])
             .await

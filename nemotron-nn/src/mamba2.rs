@@ -2,7 +2,9 @@ use crate::{LayerStub, LinearError, LinearProjection};
 use nemotron_kernels::activations::silu_in_place_host;
 use nemotron_kernels::conv1d::{depthwise_causal_conv1d_host, Conv1dError, Conv1dShape};
 use nemotron_kernels::rms_norm::{gated_rms_norm_host, RmsNormError};
-use nemotron_kernels::ssm::{selective_scan_host, SelectiveScanParams, SelectiveScanShape, SsmError};
+use nemotron_kernels::ssm::{
+    selective_scan_host, SelectiveScanParams, SelectiveScanShape, SsmError,
+};
 use nemotron_kernels::tensor::GpuTensor;
 use std::error::Error;
 use std::fmt;
@@ -398,7 +400,10 @@ impl Mamba2Mixer {
         shape: Mamba2ForwardShape,
         cache: Option<&mut Mamba2Cache>,
     ) -> Result<GpuTensor, Mamba2Error> {
-        let data = hidden_states.to_host_async().await.map_err(|e| Mamba2Error::DeviceError(e.to_string()))?;
+        let data = hidden_states
+            .to_host_async()
+            .await
+            .map_err(|e| Mamba2Error::DeviceError(e.to_string()))?;
         let result = self.forward(&data, shape, cache)?;
         GpuTensor::from_host_async(&result, &[shape.row_count(), self.hidden_size])
             .await
@@ -572,7 +577,8 @@ fn gated_rms_norm_rows(
     for row_index in 0..row_count {
         let start = row_index * row_width;
         let end = start + row_width;
-        let normalized = gated_rms_norm_host(&input[start..end], weight, &gate[start..end], epsilon)?;
+        let normalized =
+            gated_rms_norm_host(&input[start..end], weight, &gate[start..end], epsilon)?;
         output[start..end].copy_from_slice(&normalized);
     }
 
@@ -740,8 +746,12 @@ mod tests {
 
         let projected = mixer.input_projection.project(&hidden_states, 2).unwrap();
         let conv = silu_host(
-            &depthwise_causal_conv1d_host(&projected, &mixer.conv_weights, Conv1dShape::new(2, 1, 1))
-                .unwrap(),
+            &depthwise_causal_conv1d_host(
+                &projected,
+                &mixer.conv_weights,
+                Conv1dShape::new(2, 1, 1),
+            )
+            .unwrap(),
         );
         let dt = mixer.delta_t_projection.project(&hidden_states, 2).unwrap();
         let b = mixer.b_projection.project(&hidden_states, 2).unwrap();

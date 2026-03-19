@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "ssm",
@@ -249,13 +249,11 @@ pub enum SsmError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for SsmError {
     fn from(e: TensorError) -> Self {
         SsmError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API

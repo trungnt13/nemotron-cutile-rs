@@ -1,5 +1,5 @@
-use crate::KernelStub;
 use crate::tensor::{GpuTensor, TensorError};
+use crate::KernelStub;
 
 pub const SPEC: KernelStub = KernelStub {
     name: "quantize",
@@ -212,13 +212,11 @@ pub enum QuantizeError {
     DeviceError(String),
 }
 
-
 impl From<TensorError> for QuantizeError {
     fn from(e: TensorError) -> Self {
         QuantizeError::DeviceError(e.to_string())
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Async GPU API
@@ -362,7 +360,10 @@ mod tests {
         assert_eq!(pack_int4_host(&[]).unwrap(), Vec::<u8>::new());
         assert_eq!(unpack_int4_host(&[], 0).unwrap(), Vec::<u8>::new());
         assert_eq!(quantize_int4_host(&[], params).unwrap(), Vec::<u8>::new());
-        assert_eq!(dequantize_int4_host(&[], 0, params).unwrap(), Vec::<f32>::new());
+        assert_eq!(
+            dequantize_int4_host(&[], 0, params).unwrap(),
+            Vec::<f32>::new()
+        );
     }
 
     /// Verifies that a zero scale is rejected as invalid quantization params.
@@ -434,7 +435,8 @@ mod tests {
     /// This catches missing non-finite input validation.
     #[test]
     fn rejects_non_finite_input() {
-        let error = quantize_int4_host(&[f32::NAN], Int4QuantizationParams::new(1.0, 8)).unwrap_err();
+        let error =
+            quantize_int4_host(&[f32::NAN], Int4QuantizationParams::new(1.0, 8)).unwrap_err();
 
         match error {
             QuantizeError::NonFiniteInput { index, value } => {
@@ -453,7 +455,9 @@ mod tests {
         let params = Int4QuantizationParams::new(0.5, 8);
         let expected = dequantize_int4_host(&packed, value_count, params).unwrap();
 
-        let result = super::dequantize_int4(&packed, value_count, params).await.unwrap();
+        let result = super::dequantize_int4(&packed, value_count, params)
+            .await
+            .unwrap();
 
         assert_eq!(result.shape(), &[value_count]);
         approx_eq_slice(&result.to_host(), &expected);
