@@ -115,10 +115,10 @@ When adding a new kernel or layer:
 | Model runtime | ✅ Working | Config, tokenizer, weights, generation |
 | Kernel validation | ✅ 9/9 pass | Host fixture validation against bundled reference outputs |
 | GPU wrapper validation | ✅ 7/7 pass | Covers every bundled kernel fixture through async GPU wrappers |
-| Workspace tests | ✅ ~204 passing locally and on Linux/RTX 3090 | Includes crate tests + integration tests; 1 doc test remains ignored |
+| Workspace tests | ✅ Passing locally and on Linux/RTX 3090 | Includes crate tests + integration tests; 1 doc test remains ignored |
 | GPU scaffolding (cutile) | ✅ Implemented and validated on Linux | `GpuTensor`, `GpuDevice`, async kernel/nn/model wrapper paths compile and run on Linux/macOS |
-| Real cutile compute kernels | 🟡 Wave 1 partially landed | RMSNorm, softmax on power-of-two widths, tile-aligned GEMM, and affine INT4 dequantize on power-of-two lengths now execute on device on Linux; the remaining kernels still use the host bridge |
-| Benchmark mode | ✅ Local + Linux comparison mode | `nemotron-validate benchmark ...` reports host vs GPU timing/parity, including synthetic aligned GEMM coverage |
+| Real cutile compute kernels | ✅ Bounded Linux paths landed for all 10 kernels | RMSNorm, softmax, GEMM, activations, Conv1D, embedding, MoE routing, attention, SSM, and affine INT4 dequantize now have Linux cutile paths; several remain intentionally shape-limited and still fall back to the host bridge outside their validated envelopes |
+| Benchmark mode | ✅ Local + Linux comparison mode | `nemotron-validate benchmark ...` reports host vs GPU timing/parity, including synthetic aligned GEMM and Conv1D coverage |
 | Full checkpoint loading | ⏳ Pending | Needs real AWQ model weights |
 | Layer-level validation | 🚫 Blocked | vLLM internals incompatible with fixture extraction |
 | CI/CD | ❌ None | No GitHub Actions — all testing is local |
