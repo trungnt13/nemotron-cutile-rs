@@ -102,14 +102,32 @@ impl Default for AttentionOptions {
     }
 }
 
+#[cfg(target_os = "linux")]
+const ATTENTION_BACKEND: AttentionBackend = AttentionBackend::Cutile;
+#[cfg(not(target_os = "linux"))]
+const ATTENTION_BACKEND: AttentionBackend = AttentionBackend::HostFallback;
+
 pub const GROUPED_QUERY_ATTENTION: AttentionKernel = AttentionKernel {
     name: "grouped_query_attention",
-    backend: AttentionBackend::HostFallback,
+    backend: ATTENTION_BACKEND,
 };
 
 pub fn supported_attention_kernels() -> [AttentionKernel; 1] {
     [GROUPED_QUERY_ATTENTION]
 }
+
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const CUTILE_ATTENTION_SCORE_TILE_WIDTH: usize = 16;
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const CUTILE_ATTENTION_DEPTH_TILE: usize = 8;
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const CUTILE_ATTENTION_VALUE_TILE: usize = 8;
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const CUTILE_ATTENTION_SOFTMAX_MAX_WIDTH: usize = 4096;
 
 pub fn attention_scores_host(
     query: &[f32],
@@ -338,6 +356,97 @@ fn validate_shape(
     Ok(())
 }
 
+fn validate_tensor_lengths(
+    query: &GpuTensor,
+    key: &GpuTensor,
+    value: &GpuTensor,
+    shape: AttentionShape,
+) -> Result<(), AttentionError> {
+    if shape.batch_size == 0
+        || shape.query_sequence_len == 0
+        || shape.key_value_sequence_len == 0
+        || shape.query_head_count == 0
+        || shape.key_value_head_count == 0
+        || shape.head_dim == 0
+    {
+        return Err(AttentionError::InvalidShape(shape));
+    }
+
+    if !shape
+        .query_head_count
+        .is_multiple_of(shape.key_value_head_count)
+    {
+        return Err(AttentionError::HeadCountMismatch {
+            query_head_count: shape.query_head_count,
+            key_value_head_count: shape.key_value_head_count,
+        });
+    }
+
+    if query.numel() != shape.query_len() {
+        return Err(AttentionError::LengthMismatch {
+            argument: "query",
+            expected: shape.query_len(),
+            actual: query.numel(),
+        });
+    }
+
+    if key.numel() != shape.key_len() {
+        return Err(AttentionError::LengthMismatch {
+            argument: "key",
+            expected: shape.key_len(),
+            actual: key.numel(),
+        });
+    }
+
+    if value.numel() != shape.value_len() {
+        return Err(AttentionError::LengthMismatch {
+            argument: "value",
+            expected: shape.value_len(),
+            actual: value.numel(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn supports_cutile_attention(shape: AttentionShape, options: AttentionOptions) -> bool {
+    let Some(rows) = shape
+        .batch_size
+        .checked_mul(shape.query_sequence_len)
+        .and_then(|rows| rows.checked_mul(shape.query_head_count))
+    else {
+        return false;
+    };
+
+    rows > 0
+        && i32::try_from(rows).is_ok()
+        && i32::try_from(shape.batch_size).is_ok()
+        && i32::try_from(shape.query_sequence_len).is_ok()
+        && i32::try_from(shape.key_value_sequence_len).is_ok()
+        && i32::try_from(shape.query_head_count).is_ok()
+        && i32::try_from(shape.key_value_head_count).is_ok()
+        && i32::try_from(shape.head_dim).is_ok()
+        && i32::try_from(options.query_position_offset).is_ok()
+        && shape.key_value_sequence_len <= CUTILE_ATTENTION_SOFTMAX_MAX_WIDTH
+        && shape.key_value_sequence_len.is_power_of_two()
+        && shape.key_value_sequence_len % CUTILE_ATTENTION_SCORE_TILE_WIDTH == 0
+        && shape.head_dim % CUTILE_ATTENTION_DEPTH_TILE == 0
+        && shape.key_value_sequence_len % CUTILE_ATTENTION_VALUE_TILE == 0
+}
+
+fn backend_for_shape(_shape: AttentionShape, _options: AttentionOptions) -> AttentionBackend {
+    #[cfg(target_os = "linux")]
+    {
+        if supports_cutile_attention(_shape, _options) {
+            return AttentionBackend::Cutile;
+        }
+    }
+
+    AttentionBackend::HostFallback
+}
+
 fn tensor_offset(
     batch: usize,
     sequence_index: usize,
@@ -392,12 +501,327 @@ impl From<TensorError> for AttentionError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Async GPU API
-// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+#[cutile::module]
+mod cutile_attention_kernel {
+    use cutile::core::*;
 
-/// Async GPU scaled dot-product attention.
-pub async fn scaled_dot_product_attention(
+    #[cutile::entry()]
+    fn attention_scores<
+        const BN: i32,
+        const BD: i32,
+        const QUERY_SEQUENCE_LEN: i32,
+        const QUERY_HEAD_COUNT: i32,
+        const KEY_VALUE_HEAD_COUNT: i32,
+        const HEAD_DIM: i32,
+    >(
+        query: &Tensor<f32, { [-1, -1] }>,
+        key: &Tensor<f32, { [-1, -1, -1, -1] }>,
+        output: &mut Tensor<f32, { [1, BN] }>,
+        scale: f32,
+    ) {
+        let pid = get_tile_block_id();
+        let row = pid.0;
+        let key_tile = pid.1;
+        let rows_per_batch = QUERY_SEQUENCE_LEN * QUERY_HEAD_COUNT;
+        let batch = row / rows_per_batch;
+        let row_in_batch = row % rows_per_batch;
+        let query_head = row_in_batch % QUERY_HEAD_COUNT;
+        let kv_group_size = QUERY_HEAD_COUNT / KEY_VALUE_HEAD_COUNT;
+        let key_head = query_head / kv_group_size;
+        let query_partition: Partition<f32, { [1, BD] }> = query.partition(const_shape![1, BD]);
+        let key_partition: Partition<f32, { [1, 1, BD, BN] }> =
+            key.partition_permuted(const_shape![1, 1, BD, BN], const_array![0, 2, 3, 1]);
+        let mut scores: Tile<f32, { [1, BN] }> = broadcast_scalar(0.0f32, output.shape());
+
+        for depth_tile in 0i32..(HEAD_DIM / BD) {
+            let query_tile: Tile<f32, { [1, BD] }> = query_partition.load([row, depth_tile]);
+            let query_tile: Tile<f32, { [BD, 1] }> = query_tile.reshape(const_shape![BD, 1]);
+            let key_tile_values: Tile<f32, { [1, 1, BD, BN] }> =
+                key_partition.load([batch, key_head, depth_tile, key_tile]);
+            let key_tile_values: Tile<f32, { [BD, BN] }> =
+                key_tile_values.reshape(const_shape![BD, BN]);
+            let query_tile: Tile<f32, { [BD, BN] }> = query_tile.broadcast(const_shape![BD, BN]);
+            let product: Tile<f32, { [BD, BN] }> = query_tile * key_tile_values;
+            let partial: Tile<f32, { [BN] }> = reduce_sum(product, 0i32);
+            let partial: Tile<f32, { [1, BN] }> = partial.reshape(output.shape());
+            scores = scores + partial;
+        }
+
+        let scaled_scores: Tile<f32, { [1, BN] }> =
+            scores * broadcast_scalar(scale, output.shape());
+        output.store(scaled_scores);
+    }
+
+    #[cutile::entry()]
+    fn row_softmax<const BN: i32>(
+        input: &Tensor<f32, { [-1, -1] }>,
+        output: &mut Tensor<f32, { [1, BN] }>,
+    ) {
+        let tile_input: Tile<f32, { [1, BN] }> = load_tile_like_2d(input, output);
+        let tile_max: Tile<f32, { [1] }> = reduce_max(tile_input, 1i32);
+        let tile_max: Tile<f32, { [1, BN] }> = tile_max
+            .reshape(const_shape![1, 1])
+            .broadcast(output.shape());
+        let numerator: Tile<f32, { [1, BN] }> = exp(tile_input - tile_max);
+        let denominator: Tile<f32, { [1] }> = reduce_sum(numerator, 1i32);
+        let denominator: Tile<f32, { [1, BN] }> = denominator
+            .reshape(const_shape![1, 1])
+            .broadcast(output.shape());
+        output.store(numerator / denominator);
+    }
+
+    #[cutile::entry()]
+    fn masked_row_softmax<
+        const BN: i32,
+        const QUERY_SEQUENCE_LEN: i32,
+        const QUERY_HEAD_COUNT: i32,
+    >(
+        input: &Tensor<f32, { [-1, -1] }>,
+        output: &mut Tensor<f32, { [1, BN] }>,
+        query_position_offset: i32,
+    ) {
+        let pid = get_tile_block_id();
+        let row = pid.0;
+        let row_in_batch = row % (QUERY_SEQUENCE_LEN * QUERY_HEAD_COUNT);
+        let query_index = row_in_batch / QUERY_HEAD_COUNT;
+        let mut max_key_index = query_position_offset + query_index;
+        if max_key_index >= BN {
+            max_key_index = BN - 1i32;
+        }
+
+        let tile_input: Tile<f32, { [1, BN] }> = load_tile_like_2d(input, output);
+        let key_indices: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+        let valid_keys: Tile<bool, { [BN] }> = le_tile(
+            key_indices,
+            broadcast_scalar(max_key_index, const_shape![BN]),
+        );
+        let negative_inf = -3.4028235e38f32;
+        let masked_input: Tile<f32, { [BN] }> = select(
+            valid_keys,
+            tile_input.reshape(const_shape![BN]),
+            broadcast_scalar(negative_inf, const_shape![BN]),
+        );
+        let masked_input: Tile<f32, { [1, BN] }> = masked_input.reshape(output.shape());
+        let tile_max: Tile<f32, { [1] }> = reduce_max(masked_input, 1i32);
+        let tile_max: Tile<f32, { [1, BN] }> = tile_max
+            .reshape(const_shape![1, 1])
+            .broadcast(output.shape());
+        let numerator: Tile<f32, { [1, BN] }> = exp(masked_input - tile_max);
+        let denominator: Tile<f32, { [1] }> = reduce_sum(numerator, 1i32);
+        let denominator: Tile<f32, { [1, BN] }> = denominator
+            .reshape(const_shape![1, 1])
+            .broadcast(output.shape());
+        output.store(numerator / denominator);
+    }
+
+    #[cutile::entry()]
+    fn attention_weighted_values<
+        const BK: i32,
+        const BD: i32,
+        const QUERY_SEQUENCE_LEN: i32,
+        const QUERY_HEAD_COUNT: i32,
+        const KEY_VALUE_HEAD_COUNT: i32,
+        const KEY_SEQUENCE_LEN: i32,
+    >(
+        weights: &Tensor<f32, { [-1, -1] }>,
+        value: &Tensor<f32, { [-1, -1, -1, -1] }>,
+        output: &mut Tensor<f32, { [1, BD] }>,
+    ) {
+        let pid = get_tile_block_id();
+        let row = pid.0;
+        let dim_tile = pid.1;
+        let rows_per_batch = QUERY_SEQUENCE_LEN * QUERY_HEAD_COUNT;
+        let batch = row / rows_per_batch;
+        let row_in_batch = row % rows_per_batch;
+        let query_head = row_in_batch % QUERY_HEAD_COUNT;
+        let kv_group_size = QUERY_HEAD_COUNT / KEY_VALUE_HEAD_COUNT;
+        let value_head = query_head / kv_group_size;
+        let weight_partition: Partition<f32, { [1, BK] }> = weights.partition(const_shape![1, BK]);
+        let value_partition: Partition<f32, { [1, 1, BK, BD] }> =
+            value.partition_permuted(const_shape![1, 1, BK, BD], const_array![0, 2, 1, 3]);
+        let mut acc: Tile<f32, { [1, BD] }> = broadcast_scalar(0.0f32, output.shape());
+
+        for key_tile in 0i32..(KEY_SEQUENCE_LEN / BK) {
+            let weight_tile: Tile<f32, { [1, BK] }> = weight_partition.load([row, key_tile]);
+            let weight_tile: Tile<f32, { [BK, 1] }> = weight_tile.reshape(const_shape![BK, 1]);
+            let weight_tile: Tile<f32, { [BK, BD] }> = weight_tile.broadcast(const_shape![BK, BD]);
+            let value_tile: Tile<f32, { [1, 1, BK, BD] }> =
+                value_partition.load([batch, value_head, key_tile, dim_tile]);
+            let value_tile: Tile<f32, { [BK, BD] }> = value_tile.reshape(const_shape![BK, BD]);
+            let product: Tile<f32, { [BK, BD] }> = weight_tile * value_tile;
+            let partial: Tile<f32, { [BD] }> = reduce_sum(product, 0i32);
+            let partial: Tile<f32, { [1, BD] }> = partial.reshape(output.shape());
+            acc = acc + partial;
+        }
+
+        output.store(acc);
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn scaled_dot_product_attention_cutile(
+    query: &GpuTensor,
+    key: &GpuTensor,
+    value: &GpuTensor,
+    shape: AttentionShape,
+    options: AttentionOptions,
+    scale: f32,
+) -> Result<Option<GpuTensor>, AttentionError> {
+    use std::sync::Arc;
+
+    use cutile::tile_kernel::{IntoDeviceOperation, IntoDeviceOperationPartition, TileKernel};
+
+    if !supports_cutile_attention(shape, options) {
+        return Ok(None);
+    }
+
+    let rows = shape.batch_size * shape.query_sequence_len * shape.query_head_count;
+    let _rows_i32 = i32::try_from(rows).map_err(|_| {
+        AttentionError::DeviceError("attention row count overflowed i32".to_string())
+    })?;
+    let score_tile_width_i32 = i32::try_from(CUTILE_ATTENTION_SCORE_TILE_WIDTH).map_err(|_| {
+        AttentionError::DeviceError("attention score tile width overflowed i32".to_string())
+    })?;
+    let depth_tile_i32 = i32::try_from(CUTILE_ATTENTION_DEPTH_TILE).map_err(|_| {
+        AttentionError::DeviceError("attention depth tile overflowed i32".to_string())
+    })?;
+    let value_tile_i32 = i32::try_from(CUTILE_ATTENTION_VALUE_TILE).map_err(|_| {
+        AttentionError::DeviceError("attention value tile overflowed i32".to_string())
+    })?;
+    let key_sequence_len_i32 = i32::try_from(shape.key_value_sequence_len).map_err(|_| {
+        AttentionError::DeviceError(
+            "attention key/value sequence length overflowed i32".to_string(),
+        )
+    })?;
+    let query_sequence_len_i32 = i32::try_from(shape.query_sequence_len).map_err(|_| {
+        AttentionError::DeviceError("attention query sequence length overflowed i32".to_string())
+    })?;
+    let query_head_count_i32 = i32::try_from(shape.query_head_count).map_err(|_| {
+        AttentionError::DeviceError("attention query head count overflowed i32".to_string())
+    })?;
+    let key_value_head_count_i32 = i32::try_from(shape.key_value_head_count).map_err(|_| {
+        AttentionError::DeviceError("attention key/value head count overflowed i32".to_string())
+    })?;
+    let head_dim_i32 = i32::try_from(shape.head_dim).map_err(|_| {
+        AttentionError::DeviceError("attention head dimension overflowed i32".to_string())
+    })?;
+    let query_position_offset_i32 = i32::try_from(options.query_position_offset).map_err(|_| {
+        AttentionError::DeviceError("attention query position offset overflowed i32".to_string())
+    })?;
+
+    let query_tensor = query
+        .cutile_tensor_for_shape(&[rows, shape.head_dim])
+        .await?;
+    let key_tensor = key
+        .cutile_tensor_for_shape(&[
+            shape.batch_size,
+            shape.key_value_sequence_len,
+            shape.key_value_head_count,
+            shape.head_dim,
+        ])
+        .await?;
+    let value_tensor = value
+        .cutile_tensor_for_shape(&[
+            shape.batch_size,
+            shape.key_value_sequence_len,
+            shape.key_value_head_count,
+            shape.head_dim,
+        ])
+        .await?;
+
+    let score_output = cutile::api::zeros::<2, f32>([rows, shape.key_value_sequence_len])
+        .partition([1, score_tile_width_i32]);
+    let generics = vec![
+        score_tile_width_i32.to_string(),
+        depth_tile_i32.to_string(),
+        query_sequence_len_i32.to_string(),
+        query_head_count_i32.to_string(),
+        key_value_head_count_i32.to_string(),
+        head_dim_i32.to_string(),
+    ];
+    let (_query, _key, score_output, _scale) = cutile_attention_kernel::attention_scores_async(
+        query_tensor.device_operation(),
+        key_tensor.device_operation(),
+        score_output,
+        scale.device_operation(),
+    )
+    .generics(generics)
+    .await
+    .map_err(|error| {
+        AttentionError::DeviceError(format!("cutile attention score launch failed: {error:?}"))
+    })?;
+    let score_tensor = Arc::new(score_output.unpartition());
+
+    let softmax_output = cutile::api::zeros::<2, f32>([rows, shape.key_value_sequence_len])
+        .partition([1, key_sequence_len_i32]);
+    let weight_tensor = if options.causal {
+        let generics = vec![
+            key_sequence_len_i32.to_string(),
+            query_sequence_len_i32.to_string(),
+            query_head_count_i32.to_string(),
+        ];
+        let (_scores, softmax_output, _offset) = cutile_attention_kernel::masked_row_softmax_async(
+            score_tensor.device_operation(),
+            softmax_output,
+            query_position_offset_i32.device_operation(),
+        )
+        .generics(generics)
+        .await
+        .map_err(|error| {
+            AttentionError::DeviceError(format!(
+                "cutile masked attention softmax launch failed: {error:?}"
+            ))
+        })?;
+        Arc::new(softmax_output.unpartition())
+    } else {
+        let (_scores, softmax_output) = cutile_attention_kernel::row_softmax_async(
+            score_tensor.device_operation(),
+            softmax_output,
+        )
+        .generics(vec![key_sequence_len_i32.to_string()])
+        .await
+        .map_err(|error| {
+            AttentionError::DeviceError(format!(
+                "cutile attention softmax launch failed: {error:?}"
+            ))
+        })?;
+        Arc::new(softmax_output.unpartition())
+    };
+
+    let output =
+        cutile::api::zeros::<2, f32>([rows, shape.head_dim]).partition([1, value_tile_i32]);
+    let generics = vec![
+        value_tile_i32.to_string(),
+        value_tile_i32.to_string(),
+        query_sequence_len_i32.to_string(),
+        query_head_count_i32.to_string(),
+        key_value_head_count_i32.to_string(),
+        key_sequence_len_i32.to_string(),
+    ];
+    let (_weights, _value, output) = cutile_attention_kernel::attention_weighted_values_async(
+        weight_tensor.device_operation(),
+        value_tensor.device_operation(),
+        output,
+    )
+    .generics(generics)
+    .await
+    .map_err(|error| {
+        AttentionError::DeviceError(format!(
+            "cutile attention weighted-value launch failed: {error:?}"
+        ))
+    })?;
+    let output_shape = &[
+        shape.batch_size,
+        shape.query_sequence_len,
+        shape.query_head_count,
+        shape.head_dim,
+    ];
+    let output = output.unpartition().reshape_dyn(output_shape);
+    Ok(Some(GpuTensor::from_cutile_tensor(output, output_shape)?))
+}
+
+async fn scaled_dot_product_attention_host_bridge(
     query: &GpuTensor,
     key: &GpuTensor,
     value: &GpuTensor,
@@ -417,33 +841,120 @@ pub async fn scaled_dot_product_attention(
     Ok(GpuTensor::from_host_async(&result, output_shape).await?)
 }
 
+// ---------------------------------------------------------------------------
+// Async GPU API
+// ---------------------------------------------------------------------------
+
+/// Async GPU scaled dot-product attention.
+pub async fn scaled_dot_product_attention(
+    query: &GpuTensor,
+    key: &GpuTensor,
+    value: &GpuTensor,
+    shape: AttentionShape,
+    options: AttentionOptions,
+) -> Result<GpuTensor, AttentionError> {
+    validate_tensor_lengths(query, key, value, shape)?;
+    let scale = options.resolve_scale(shape.head_dim)?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = scale;
+
+    match backend_for_shape(shape, options) {
+        #[cfg(target_os = "linux")]
+        AttentionBackend::Cutile => {
+            if let Some(output) =
+                scaled_dot_product_attention_cutile(query, key, value, shape, options, scale)
+                    .await?
+            {
+                return Ok(output);
+            }
+            scaled_dot_product_attention_host_bridge(query, key, value, shape, options).await
+        }
+        AttentionBackend::HostFallback => {
+            scaled_dot_product_attention_host_bridge(query, key, value, shape, options).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        AttentionBackend::Cutile => {
+            unreachable!("non-Linux platforms never select the cutile attention backend")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
+    fn approx_eq_slice_with_tolerance(lhs: &[f32], rhs: &[f32], tolerance: f32) {
         assert_eq!(lhs.len(), rhs.len(), "slice lengths differ");
         for (index, (left, right)) in lhs.iter().zip(rhs.iter()).enumerate() {
             let diff = (left - right).abs();
             assert!(
-                diff <= 1e-5,
-                "index {index}: left={left:?}, right={right:?}, diff={diff:?}"
+                diff <= tolerance,
+                "index {index}: left={left:?}, right={right:?}, diff={diff:?}, tolerance={tolerance:?}"
             );
         }
     }
 
-    /// Verifies that the attention kernel reports HostFallback as its backend.
-    ///
-    /// This catches accidental backend tag changes before GPU kernels exist.
+    fn approx_eq_slice(lhs: &[f32], rhs: &[f32]) {
+        approx_eq_slice_with_tolerance(lhs, rhs, 1e-5);
+    }
+
+    /// Verifies that the attention kernel reports the active platform backend when queried. This catches accidental backend metadata regressions.
     #[test]
-    fn reports_host_fallback_backend_for_now() {
-        assert_eq!(
-            supported_attention_kernels(),
-            [AttentionKernel {
-                name: "grouped_query_attention",
-                backend: AttentionBackend::HostFallback,
-            }]
-        );
+    fn reports_platform_attention_backend() {
+        #[cfg(target_os = "linux")]
+        let expected = [AttentionKernel {
+            name: "grouped_query_attention",
+            backend: AttentionBackend::Cutile,
+        }];
+
+        #[cfg(not(target_os = "linux"))]
+        let expected = [AttentionKernel {
+            name: "grouped_query_attention",
+            backend: AttentionBackend::HostFallback,
+        }];
+
+        assert_eq!(supported_attention_kernels(), expected);
+    }
+
+    /// Verifies that the attention backend selector only enables cutile for the supported Linux shape envelope. This catches accidental dispatch of unsupported shapes into the device kernels.
+    #[test]
+    fn cutile_support_heuristic_respects_shape_boundaries() {
+        let supported = AttentionShape::new(1, 2, 16, 2, 1, 8);
+        let bad_kv_len = AttentionShape::new(1, 2, 12, 2, 1, 8);
+        let bad_head_dim = AttentionShape::new(1, 2, 16, 2, 1, 6);
+        let options = AttentionOptions::default();
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                backend_for_shape(supported, options),
+                AttentionBackend::Cutile
+            );
+            assert_eq!(
+                backend_for_shape(bad_kv_len, options),
+                AttentionBackend::HostFallback
+            );
+            assert_eq!(
+                backend_for_shape(bad_head_dim, options),
+                AttentionBackend::HostFallback
+            );
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(
+                backend_for_shape(supported, options),
+                AttentionBackend::HostFallback
+            );
+            assert_eq!(
+                backend_for_shape(bad_kv_len, options),
+                AttentionBackend::HostFallback
+            );
+            assert_eq!(
+                backend_for_shape(bad_head_dim, options),
+                AttentionBackend::HostFallback
+            );
+        }
     }
 
     /// Verifies Q·Kᵀ dot-product scores with a single head and scale=1.
@@ -641,5 +1152,136 @@ mod tests {
             .unwrap();
         assert_eq!(result.shape(), &[1, 1, 1, 2]);
         assert_eq!(result.to_host(), expected);
+    }
+
+    /// Verifies that the async GPU attention matches host parity across supported non-causal and decode-causal shapes. This catches device-kernel math, masking, or reshape regressions while keeping cutile kernel compilation serialized in one test.
+    #[tokio::test]
+    async fn gpu_attention_matches_host_for_supported_cutile_shapes() {
+        let shape = AttentionShape::new(1, 2, 16, 2, 1, 8);
+        let options = AttentionOptions {
+            softmax_scale: Some(0.5),
+            ..AttentionOptions::default()
+        };
+        let query = (0..shape.query_len())
+            .map(|index| (index % 11) as f32 * 0.1 - 0.5)
+            .collect::<Vec<_>>();
+        let key = (0..shape.key_len())
+            .map(|index| (index % 7) as f32 * 0.125 - 0.25)
+            .collect::<Vec<_>>();
+        let value = (0..shape.value_len())
+            .map(|index| (index % 13) as f32 * 0.2 - 0.6)
+            .collect::<Vec<_>>();
+        let expected =
+            scaled_dot_product_attention_host(&query, &key, &value, shape, options).unwrap();
+        let gpu_q = GpuTensor::from_host(
+            &query,
+            &[
+                1,
+                shape.query_sequence_len,
+                shape.query_head_count,
+                shape.head_dim,
+            ],
+        )
+        .unwrap();
+        let gpu_k = GpuTensor::from_host(
+            &key,
+            &[
+                1,
+                shape.key_value_sequence_len,
+                shape.key_value_head_count,
+                shape.head_dim,
+            ],
+        )
+        .unwrap();
+        let gpu_v = GpuTensor::from_host(
+            &value,
+            &[
+                1,
+                shape.key_value_sequence_len,
+                shape.key_value_head_count,
+                shape.head_dim,
+            ],
+        )
+        .unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(backend_for_shape(shape, options), AttentionBackend::Cutile);
+
+        let result = super::scaled_dot_product_attention(&gpu_q, &gpu_k, &gpu_v, shape, options)
+            .await
+            .unwrap();
+        assert_eq!(result.shape(), &[1, 2, 2, 8]);
+        approx_eq_slice_with_tolerance(&result.to_host(), &expected, 5e-5);
+
+        let causal_shape = AttentionShape::new(1, 1, 16, 2, 1, 8);
+        let causal_options = AttentionOptions {
+            causal: true,
+            query_position_offset: 7,
+            softmax_scale: Some(0.75),
+        };
+        let causal_query = (0..causal_shape.query_len())
+            .map(|index| (index % 5) as f32 * 0.3 - 0.6)
+            .collect::<Vec<_>>();
+        let causal_key = (0..causal_shape.key_len())
+            .map(|index| (index % 9) as f32 * 0.15 - 0.3)
+            .collect::<Vec<_>>();
+        let causal_value = (0..causal_shape.value_len())
+            .map(|index| (index % 17) as f32 * 0.05 - 0.4)
+            .collect::<Vec<_>>();
+        let causal_expected = scaled_dot_product_attention_host(
+            &causal_query,
+            &causal_key,
+            &causal_value,
+            causal_shape,
+            causal_options,
+        )
+        .unwrap();
+        let causal_gpu_q = GpuTensor::from_host(
+            &causal_query,
+            &[
+                1,
+                causal_shape.query_sequence_len,
+                causal_shape.query_head_count,
+                causal_shape.head_dim,
+            ],
+        )
+        .unwrap();
+        let causal_gpu_k = GpuTensor::from_host(
+            &causal_key,
+            &[
+                1,
+                causal_shape.key_value_sequence_len,
+                causal_shape.key_value_head_count,
+                causal_shape.head_dim,
+            ],
+        )
+        .unwrap();
+        let causal_gpu_v = GpuTensor::from_host(
+            &causal_value,
+            &[
+                1,
+                causal_shape.key_value_sequence_len,
+                causal_shape.key_value_head_count,
+                causal_shape.head_dim,
+            ],
+        )
+        .unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            backend_for_shape(causal_shape, causal_options),
+            AttentionBackend::Cutile
+        );
+
+        let causal_result = super::scaled_dot_product_attention(
+            &causal_gpu_q,
+            &causal_gpu_k,
+            &causal_gpu_v,
+            causal_shape,
+            causal_options,
+        )
+        .await
+        .unwrap();
+        approx_eq_slice_with_tolerance(&causal_result.to_host(), &causal_expected, 5e-5);
     }
 }
